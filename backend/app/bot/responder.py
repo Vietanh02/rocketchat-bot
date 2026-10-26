@@ -80,9 +80,9 @@ class RuleResponder:
             if reply is None:
                 live_reply.abort()
             else:
-                if reply.error and live_reply.shown:
-                    # The user has watched the output; keep it above the warning.
-                    reply.text = f"{live_reply.shown}\n\n{reply.text}"
+                if reply.error and live_reply.output:
+                    # The user is watching the output; keep it above the warning.
+                    reply.text = f"{live_reply.output}\n\n{reply.text}"
                 reply.live = live_reply
         return reply
 

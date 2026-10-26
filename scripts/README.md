@@ -42,8 +42,8 @@ Files and folders starting with `.` or `_` are never offered, so keep helpers in
 ## Streaming output
 
 With **Reply style → Streaming** in Bot settings, the user sees output while the
-script runs: the reply is posted at the first `print` and edited as more lines
-arrive (at most twice a second). That suits long jobs that report progress:
+script runs: it is typed out from the first `print` onwards, using the same
+*characters per update* and *delay* as any streamed reply. That suits long jobs that report progress:
 
 ```python
 import time

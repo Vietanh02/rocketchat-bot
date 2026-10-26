@@ -63,6 +63,11 @@ def test_a_word_longer_than_a_chunk_is_split():
     assert stream_steps("abcdefghij", 4, max_steps=100) == ["abcd", "abcdefgh", "abcdefghij"]
 
 
+def test_every_step_shows_something_new():
+    steps = stream_steps("one\n\n  two six", 4, max_steps=100)
+    assert steps == ["one\n", "one\n\n  two ", "one\n\n  two six"]
+
+
 def test_a_split_never_strands_a_combining_mark():
     text = "Việt"  # "Việt" written with combining marks
     for step in stream_steps(text, 3, max_steps=100):
@@ -200,15 +205,73 @@ async def test_the_portal_interval_cannot_go_below_the_live_minimum(fast_live):
     assert gateway.last_text == "a b"
 
 
-async def test_finish_does_not_wait_out_the_interval(fast_live, monkeypatch):
-    monkeypatch.setattr(streaming, "LIVE_MIN_INTERVAL_SECONDS", 30)
+async def test_printed_output_is_typed_out_by_characters_per_update(fast_live):
     gateway = FakeGateway()
-    live = LiveReply(gateway, "R1", options=fast_live)
-    live.push("a")
+    live = LiveReply(gateway, "R1", options=DeliveryOptions(mode="stream", chunk_chars=4,
+                                                            interval_ms=50))
+    live.push("one two six\n")  # printed in one go
     await asyncio.sleep(0.01)
-    live.push("a b")
-    await asyncio.wait_for(live.finish("a b c"), 1)
-    assert gateway.last_text == "a b c" and len(gateway.sent) == 1
+    assert [m.text for m in gateway.sent] == ["one" + STREAM_CURSOR]
+    await asyncio.sleep(0.2)
+    assert [text for _, text in gateway.updates] == [
+        "one two" + STREAM_CURSOR,
+        "one two six" + STREAM_CURSOR,
+    ]
+    await live.finish("one two six")
+    assert gateway.last_text == "one two six"
+
+
+async def test_printed_output_is_typed_out_at_the_configured_delay(fast_live):
+    gateway = FakeGateway()
+    live = LiveReply(gateway, "R1", options=DeliveryOptions(mode="stream", chunk_chars=2,
+                                                            interval_ms=200))
+    live.push("a b c")
+    await asyncio.sleep(0.1)
+    assert gateway.updates == []  # still inside the 200 ms delay
+    await asyncio.sleep(0.2)
+    assert [text for _, text in gateway.updates] == ["a b" + STREAM_CURSOR]
+    live.abort()
+
+
+async def test_the_rest_is_typed_out_after_the_script_exits(fast_live):
+    gateway = FakeGateway()
+    slept: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        await asyncio.sleep(seconds)
+
+    live = LiveReply(gateway, "R1", sleep=sleep,
+                     options=DeliveryOptions(mode="stream", chunk_chars=4, interval_ms=50))
+    live.push("one")
+    await asyncio.sleep(0.01)
+    sent = await live.finish("one two six")
+    assert [text for _, text in gateway.updates] == [
+        "one two" + STREAM_CURSOR,
+        "one two six",
+    ]
+    assert len(slept) == 2 and all(0 < s <= 0.05 for s in slept)
+    assert sent.message_id == gateway.sent[0].message_id
+
+
+async def test_finishing_keeps_to_the_streaming_time_limit(fast_live):
+    gateway = FakeGateway()
+    live = LiveReply(gateway, "R1", sleep=no_sleep,
+                     options=DeliveryOptions(mode="stream", chunk_chars=1, interval_ms=50))
+    live.push("x")
+    await asyncio.sleep(0.01)
+    await live.finish("x " + LONG * 20)
+    assert len(gateway.updates) <= MAX_STREAM_EDITS
+    assert gateway.last_text == "x " + LONG * 20
+
+
+async def test_output_that_was_never_posted_is_streamed_as_a_normal_reply(fast_live):
+    gateway = FakeGateway()
+    live = LiveReply(gateway, "R1", sleep=no_sleep, options=STREAM)
+    await live.finish(LONG)
+    assert len(gateway.sent) == 1 and len(gateway.updates) > 1
+    assert gateway.updates[0][1] == render_partial(stream_steps(LONG, 10, 41)[1])
+    assert gateway.last_text == LONG
 
 
 async def test_without_output_the_final_reply_is_simply_sent(fast_live):

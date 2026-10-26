@@ -222,10 +222,12 @@ grow in bigger chunks instead of taking longer, because a user's next message wa
 their current reply has finished streaming. Short replies that fit in one chunk are posted
 whole. Reminders are always posted whole.
 
-**Script commands stream live.** In streaming mode a script's output is shown while it runs:
-the first line it prints is posted with the `▍` cursor, and the message is edited as more
-arrives, at most every *delay* ms and never more than twice a second. When the script exits
-the message becomes the final reply. If it fails or times out, what it printed stays and the
+**Script commands stream live.** In streaming mode a script's output is typed out while it
+runs, with the same *characters per update* and *delay* as any streamed reply: the bot posts
+the start of the first line it prints, then reveals the next chunk every *delay* ms as long as
+there is printed output left to show. If the script prints faster than that, chunks grow so
+the message keeps up. When the script exits, whatever is left is typed out within the usual
+40-edit / 8-second limits and the message becomes the final reply. If it fails or times out, what it printed stays and the
 warning is added below it. Python scripts run unbuffered, so a plain `print()` shows up right
 away; other languages should flush their output (`stdbuf -oL` for shell tools that buffer).
 
