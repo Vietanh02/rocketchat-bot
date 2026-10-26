@@ -1,0 +1,16 @@
+# Pinned loosely; pyproject.toml is the source of truth for ranges.
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pydantic[email]>=2.9
+pydantic-settings>=2.6
+sqlalchemy[asyncio]>=2.0.36
+aiosqlite>=0.20
+alembic>=1.14
+httpx>=0.27
+websockets>=13
+python-jose[cryptography]>=3.3
+argon2-cffi>=23.1
+cryptography>=43
+apscheduler>=3.10,<4
+jinja2>=3.1
+python-multipart>=0.0.12

@@ -1,0 +1,20 @@
+services:
+  rocketchat:
+    image: rocket.chat:8.5.3
+    restart: always
+    environment:
+      - MONGO_URL=mongodb://mongodb:27017/rocketchat?replicaSet=rs0
+      - MONGO_OPLOG_URL=mongodb://mongodb:27017/local?replicaSet=rs0
+      - ROOT_URL=http://localhost:3000
+      - PORT=3000
+    depends_on:
+      - mongodb
+    ports:
+      - "3000:3000"
+
+  mongodb:
+    image: mongodb/mongodb-community-server:8.0-ubi8
+    restart: always
+    volumes:
+      - ./mongo_data:/var/lib/mongo
+    command: mongod --replSet rs0 --oplogSize 128

@@ -1,0 +1,53 @@
+# The bot and its portal. Rocket.Chat itself stays in rocketchat_server/.
+#
+#   cd rocketchat_server && docker compose up -d     # chat server first
+#   cd .. && docker compose up -d --build            # then the bot
+#
+# The two stacks are joined by the external network below, so the bot can
+# reach Rocket.Chat at http://rocketchat:3000 instead of going via the host.
+
+services:
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    env_file:
+      # Optional: copy backend/.env.example to backend/.env to use it.
+      - path: ./backend/.env
+        required: false
+    environment:
+      # Container-to-container addresses override whatever .env holds.
+      APP_DATABASE_URL: sqlite+aiosqlite:////app/data/bot.db
+      APP_RC_REST_URL: ${APP_RC_REST_URL:-http://rocketchat:3000}
+      APP_RC_WS_URL: ${APP_RC_WS_URL:-ws://rocketchat:3000/websocket}
+      APP_CORS_ORIGINS: ${APP_CORS_ORIGINS:-http://localhost:8080}
+      APP_SCRIPTS_DIR: /app/scripts
+    volumes:
+      - bot_data:/app/data
+      # Script commands. Read-only: the bot runs these files, never writes them.
+      # Edits on the host apply on the next run, with no rebuild.
+      - ./scripts:/app/scripts:ro
+    networks:
+      - botnet
+      - rocketchat
+    expose:
+      - "8000"
+
+  portal:
+    build: ./portal
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${PORTAL_PORT:-8081}:80"
+    networks:
+      - botnet
+
+volumes:
+  bot_data:
+
+networks:
+  botnet:
+  rocketchat:
+    # Created by rocketchat_server/docker-compose.yml. Start that stack first.
+    external: true
+    name: rocketchat_server_default

@@ -1,0 +1,19 @@
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+*.pyc
+backend/data/
+backend/.env
+backend/.pytest_cache/
+
+# Node
+portal/node_modules/
+portal/dist/
+
+# Rocket.Chat server data
+rocketchat_server/mongo_data/
+
+# Local scratch
+*.log
+backend/rocketchat_bot.egg-info/
