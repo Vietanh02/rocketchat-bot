@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.rocketchat.ddp import IncomingMessage
+
+if TYPE_CHECKING:
+    from app.bot.streaming import LiveReply
 
 
 @dataclass(slots=True)
@@ -93,3 +96,5 @@ class Reply:
     error: str | None = None
     # The sender is not allowed to use the bot; nothing is sent to them.
     denied: bool = False
+    # Already on screen while it was produced; sending finishes this message.
+    live: LiveReply | None = None

@@ -16,7 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.bot.builtins import BuiltinContext, get_builtin
 from app.bot.config_store import ConfigSnapshot, ConfigStore
 from app.bot.router import MatchResult
-from app.bot.scripts import ScriptError, result_to_reply, run_script
+from app.bot.scripts import ScriptError, clip_output, result_to_reply, run_script
+from app.bot.streaming import DeliveryOptions, LiveReply
 from app.bot.types import MessageContext, Reply
 from app.integrations.executor import (
     IntegrationError,
@@ -36,7 +37,7 @@ GatewayProvider = Callable[[], Gateway | None]
 class Responder(Protocol):
     """Turns an inbound message into an optional reply."""
 
-    async def respond(self, message: MessageContext) -> Reply | None: ...
+    async def respond(self, message: MessageContext, *, live: bool = True) -> Reply | None: ...
 
 
 class RuleResponder:
@@ -52,7 +53,8 @@ class RuleResponder:
         self._gateway_provider = gateway_provider
         self._scheduler = scheduler
 
-    async def respond(self, message: MessageContext) -> Reply | None:
+    async def respond(self, message: MessageContext, *, live: bool = True) -> Reply | None:
+        """`live=False` never posts while answering, as when the portal tests a command."""
         snapshot = await self._config_store.current()
         settings = snapshot.settings
 
@@ -67,8 +69,32 @@ class RuleResponder:
         if match is None:
             return self._fallback(message, snapshot)
 
+        live_reply = self._live_reply(message, match, snapshot) if live else None
         try:
-            text = await self._render(message, match, snapshot)
+            reply = await self._answer(message, match, snapshot, live_reply)
+        except BaseException:
+            if live_reply is not None:
+                live_reply.abort()
+            raise
+        if live_reply is not None:
+            if reply is None:
+                live_reply.abort()
+            else:
+                if reply.error and live_reply.shown:
+                    # The user has watched the output; keep it above the warning.
+                    reply.text = f"{live_reply.shown}\n\n{reply.text}"
+                reply.live = live_reply
+        return reply
+
+    async def _answer(
+        self,
+        message: MessageContext,
+        match: MatchResult,
+        snapshot: ConfigSnapshot,
+        live: LiveReply | None,
+    ) -> Reply | None:
+        try:
+            text = await self._render(message, match, snapshot, live)
         except (IntegrationError, ScriptError) as exc:
             log.info("Command %r failed: %s", match.command.name, exc)
             return self._reply(
@@ -120,6 +146,28 @@ class RuleResponder:
         """A refused user addressed the bot: log it, but never answer."""
         return Reply(text="", denied=True)
 
+    def _live_reply(
+        self, message: MessageContext, match: MatchResult, snapshot: ConfigSnapshot
+    ) -> LiveReply | None:
+        """In streaming mode, a script's output is shown while it runs."""
+        if match.command.response_type != ResponseType.script.value:
+            return None
+        options = DeliveryOptions.from_settings(snapshot.settings)
+        gateway = self._gateway_provider()
+        if not options.streaming or gateway is None:
+            return None
+        return LiveReply(
+            gateway,
+            message.room_id,
+            thread_id=self._thread_for(message, snapshot),
+            options=options,
+        )
+
+    def _thread_for(self, message: MessageContext, snapshot: ConfigSnapshot) -> str | None:
+        if message.thread_id is None and snapshot.settings.reply_in_thread:
+            return message.message_id
+        return message.thread_id
+
     def _reply(
         self,
         message: MessageContext,
@@ -129,11 +177,11 @@ class RuleResponder:
         *,
         error: str | None = None,
     ) -> Reply:
-        thread_id = message.thread_id
-        if thread_id is None and snapshot.settings.reply_in_thread:
-            thread_id = message.message_id
         return Reply(
-            text=text, thread_id=thread_id, command_name=command_name, error=error
+            text=text,
+            thread_id=self._thread_for(message, snapshot),
+            command_name=command_name,
+            error=error,
         )
 
     # ----------------------------------------------------------------- #
@@ -143,6 +191,7 @@ class RuleResponder:
         message: MessageContext,
         match: MatchResult,
         snapshot: ConfigSnapshot,
+        live: LiveReply | None = None,
     ) -> str:
         command = match.command
         context = {**message.template_vars(), **match.template_vars()}
@@ -189,6 +238,7 @@ class RuleResponder:
                 args=match.args,
                 context=script_context(message, match),
                 timeout=command.script_timeout_seconds,
+                on_output=None if live is None else lambda out: live.push(clip_output(out)),
             )
             log.info(
                 "Script %r exited %s in %dms",

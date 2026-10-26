@@ -39,6 +39,26 @@ Files and folders starting with `.` or `_` are never offered, so keep helpers in
 - Over the command's timeout (30 s by default, 300 s max): the script and
   anything it started are killed.
 
+## Streaming output
+
+With **Reply style → Streaming** in Bot settings, the user sees output while the
+script runs: the reply is posted at the first `print` and edited as more lines
+arrive (at most twice a second). That suits long jobs that report progress:
+
+```python
+import time
+
+for step in ("Pulling image", "Running migrations", "Restarting"):
+    print(f"- {step}…")
+    time.sleep(2)
+print("**Deployed.**")
+```
+
+Python scripts run with `PYTHONUNBUFFERED=1`, so `print` needs no `flush=True`.
+In bash and node, `echo` and `console.log` already write immediately; tools that
+buffer when piped (`grep`, `awk`, …) can be wrapped in `stdbuf -oL`. On failure
+or timeout, the lines printed so far stay in the message above the warning.
+
 Several users can run scripts at once (up to `APP_SCRIPT_MAX_CONCURRENCY`, 20 by
 default), so a script may run in parallel with another copy of itself. Avoid writing
 to a shared file without locking it.

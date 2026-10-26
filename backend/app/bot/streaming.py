@@ -8,11 +8,15 @@ itself, which the runner already ignores.
 The number of edits is capped, so a long reply grows in bigger chunks rather
 than taking longer: the message loop handles one reply at a time, and a slow
 stream would hold up everyone else's answers.
+
+`LiveReply` is the other kind of stream: text that is still being produced,
+such as a script's output, shown as it arrives rather than replayed afterwards.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import math
 import unicodedata
@@ -30,6 +34,9 @@ STREAM_CURSOR = " ▍"
 # Upper bounds for one streamed reply, whatever the portal settings say.
 MAX_STREAM_EDITS = 40
 MAX_STREAM_SECONDS = 8.0
+# A live reply is edited at most this often, whatever the portal says, so a
+# long-running script cannot flood Rocket.Chat with edits.
+LIVE_MIN_INTERVAL_SECONDS = 0.5
 
 Sleep = Callable[[float], Awaitable[None]]
 
@@ -160,3 +167,95 @@ async def _finish(
         # Editing is probably disabled for the bot. The partial message stays,
         # but the full reply follows it.
         return await gateway.send_message(room_id, text, thread_id=thread_id)
+
+
+class LiveReply:
+    """A reply shown while it is still being produced, such as a script's output.
+
+    `push` hands over the text so far. The first non-blank text is posted with
+    a cursor, and later text replaces it, at most once per interval; pushes in
+    between are folded into the next edit. `finish` puts the final text in
+    place, or sends it as a new message if nothing was posted or editing fails.
+    """
+
+    def __init__(
+        self,
+        gateway: Gateway,
+        room_id: str,
+        *,
+        thread_id: str | None = None,
+        options: DeliveryOptions | None = None,
+    ) -> None:
+        options = options or DeliveryOptions()
+        self._gateway = gateway
+        self._room_id = room_id
+        self._thread_id = thread_id
+        self._interval = max(options.interval_ms / 1000, LIVE_MIN_INTERVAL_SECONDS)
+        self._latest = ""
+        self._shown = ""
+        self._message_id: str | None = None
+        self._shown_at = -math.inf
+        self._closed = False
+        self._failed = False
+        self._wake = asyncio.Event()
+        self._task: asyncio.Task | None = None
+
+    @property
+    def shown(self) -> str:
+        """What the chat currently shows, without the cursor."""
+        return self._shown
+
+    def push(self, text: str) -> None:
+        if self._closed or self._failed or not text.strip():
+            return
+        self._latest = text
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._show_latest(), name="live-reply")
+
+    async def _show_latest(self) -> None:
+        loop = asyncio.get_running_loop()
+        while not self._closed and self._latest != self._shown:
+            wait = self._shown_at + self._interval - loop.time()
+            if wait > 0:
+                # `finish` sets the event, so it never waits out the interval.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._wake.wait(), wait)
+                continue
+            text = self._latest
+            try:
+                if self._message_id is None:
+                    sent = await self._gateway.send_message(
+                        self._room_id, render_partial(text), thread_id=self._thread_id
+                    )
+                    self._message_id = sent.message_id
+                else:
+                    await self._gateway.update_message(
+                        self._room_id, self._message_id, render_partial(text)
+                    )
+            except RocketChatError as exc:
+                log.warning("Live reply edit failed (%s); the full reply follows at the end", exc)
+                self._failed = True
+                return
+            self._shown, self._shown_at = text, loop.time()
+            if self._message_id is None:
+                log.warning("Rocket.Chat returned no message id; the full reply follows at the end")
+                self._failed = True
+                return
+
+    async def finish(self, text: str) -> SentMessage:
+        """Replace the live message with `text`, the complete reply."""
+        self._closed = True
+        self._wake.set()
+        if self._task is not None:
+            await self._task
+        if self._message_id is None:
+            return await self._gateway.send_message(
+                self._room_id, text, thread_id=self._thread_id
+            )
+        return await _finish(self._gateway, self._room_id, self._message_id, text, self._thread_id)
+
+    def abort(self) -> None:
+        """Stop showing updates; for when no final reply will come."""
+        self._closed = True
+        if self._task is not None:
+            self._task.cancel()

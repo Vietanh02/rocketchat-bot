@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from sqlalchemy import select
 
+from app.bot import streaming
 from app.bot.streaming import (
     MAX_STREAM_EDITS,
     STREAM_CURSOR,
     DeliveryOptions,
+    LiveReply,
     deliver,
     render_partial,
     stream_steps,
@@ -141,6 +145,91 @@ async def test_if_editing_is_refused_the_full_reply_is_still_sent():
     assert len(gateway.sent) == 2
     assert gateway.sent[0].text.endswith(STREAM_CURSOR)
     assert gateway.sent[1].text == LONG == sent.text
+
+
+# --------------------------------------------------------------------------- #
+# Live replies (output shown while it is produced)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def fast_live(monkeypatch):
+    monkeypatch.setattr(streaming, "LIVE_MIN_INTERVAL_SECONDS", 0.05)
+    return DeliveryOptions(mode="stream", interval_ms=50)
+
+
+async def test_a_live_reply_posts_at_once_then_edits_the_same_message(fast_live):
+    gateway = FakeGateway()
+    live = LiveReply(gateway, "R1", thread_id="T1", options=fast_live)
+
+    live.push("step 1\n")
+    await asyncio.sleep(0.01)
+    assert [m.text for m in gateway.sent] == ["step 1" + STREAM_CURSOR]
+    assert gateway.sent[0].thread_id == "T1"
+
+    live.push("step 1\nstep 2\n")
+    await asyncio.sleep(0.1)
+    assert gateway.updates[-1][1] == "step 1\nstep 2" + STREAM_CURSOR
+
+    sent = await live.finish("step 1\nstep 2")
+    assert [m.text for m in gateway.sent] == ["step 1\nstep 2"]
+    assert sent.message_id == gateway.sent[0].message_id
+
+
+async def test_pushes_within_one_interval_become_one_edit(fast_live):
+    gateway = FakeGateway()
+    live = LiveReply(gateway, "R1", options=fast_live)
+    live.push("a")
+    await asyncio.sleep(0.01)
+    for text in ("a b", "a b c", "a b c d"):
+        live.push(text)
+    await asyncio.sleep(0.1)
+    assert [text for _, text in gateway.updates] == ["a b c d" + STREAM_CURSOR]
+    await live.finish("a b c d")
+
+
+async def test_the_portal_interval_cannot_go_below_the_live_minimum(fast_live):
+    gateway = FakeGateway()
+    live = LiveReply(gateway, "R1", options=DeliveryOptions(mode="stream", interval_ms=0))
+    live.push("a")
+    await asyncio.sleep(0.01)
+    live.push("a b")
+    await asyncio.sleep(0.02)
+    assert gateway.updates == []  # still inside the 50 ms minimum
+    await live.finish("a b")
+    assert gateway.last_text == "a b"
+
+
+async def test_finish_does_not_wait_out_the_interval(fast_live, monkeypatch):
+    monkeypatch.setattr(streaming, "LIVE_MIN_INTERVAL_SECONDS", 30)
+    gateway = FakeGateway()
+    live = LiveReply(gateway, "R1", options=fast_live)
+    live.push("a")
+    await asyncio.sleep(0.01)
+    live.push("a b")
+    await asyncio.wait_for(live.finish("a b c"), 1)
+    assert gateway.last_text == "a b c" and len(gateway.sent) == 1
+
+
+async def test_without_output_the_final_reply_is_simply_sent(fast_live):
+    gateway = FakeGateway()
+    live = LiveReply(gateway, "R1", options=fast_live)
+    live.push("  \n")
+    await live.finish(":white_check_mark: Done.")
+    assert [m.text for m in gateway.sent] == [":white_check_mark: Done."]
+    assert gateway.updates == []
+
+
+async def test_if_live_edits_are_refused_the_full_reply_follows(fast_live):
+    gateway = FakeGateway()
+    live = LiveReply(gateway, "R1", options=fast_live)
+    live.push("step 1")
+    await asyncio.sleep(0.01)
+    gateway.fail_updates = RocketChatError("editing is not allowed")
+    live.push("step 1 step 2")
+    await asyncio.sleep(0.1)
+    await live.finish("step 1 step 2")
+    assert [m.text for m in gateway.sent] == ["step 1" + STREAM_CURSOR, "step 1 step 2"]
 
 
 # --------------------------------------------------------------------------- #

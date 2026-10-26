@@ -6,13 +6,16 @@ cannot create or change one.
 
 A script gets the command's arguments as argv (never through a shell), the
 message context as JSON on stdin and as BOT_* environment variables, and its
-stdout becomes the reply. Its environment is built from scratch, so the bot's
-own secrets (APP_SECRET_KEY, the Rocket.Chat token) never reach it.
+stdout becomes the reply. A caller can also watch stdout as it is printed
+(`on_output`), which is how streaming mode shows a script's progress live.
+Its environment is built from scratch, so the bot's own secrets
+(APP_SECRET_KEY, the Rocket.Chat token) never reach it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import json
 import os
@@ -21,6 +24,7 @@ import shutil
 import signal
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -42,6 +46,9 @@ MAX_LISTED = 500
 _concurrency: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
 
 _ENV_NAME_RE = re.compile(r"[^A-Za-z0-9_]")
+
+# Called with all of stdout so far, each time the script prints more.
+OutputCallback = Callable[[str], None]
 
 
 class ScriptError(RuntimeError):
@@ -153,6 +160,9 @@ def build_env(context: dict[str, Any]) -> dict[str, str]:
         "LANG": "C.UTF-8",
         "PYTHONIOENCODING": "utf-8",
         "PYTHONDONTWRITEBYTECODE": "1",
+        # Python buffers stdout when it is a pipe, so prints would only arrive
+        # at exit; unbuffered, they can be shown in chat as they happen.
+        "PYTHONUNBUFFERED": "1",
     }
     for name in ("TZ", *settings.script_env_passthrough_list):
         if name in os.environ:
@@ -179,18 +189,26 @@ def build_env(context: dict[str, Any]) -> dict[str, str]:
     return env
 
 
-async def _read_capped(stream: asyncio.StreamReader, limit: int) -> tuple[bytes, bool]:
+async def _read_capped(
+    stream: asyncio.StreamReader, limit: int, on_output: OutputCallback | None = None
+) -> tuple[bytes, bool]:
     """Read everything, keeping the first `limit` bytes.
 
     The rest is drained and dropped, so a chatty script cannot exhaust memory
-    or block on a full pipe.
+    or block on a full pipe. `on_output` sees the kept text as it arrives.
     """
     kept = bytearray()
     truncated = False
+    # Incremental, so a character split across two reads is not mangled.
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    text = ""
     while chunk := await stream.read(65536):
         room = limit - len(kept)
         if room > 0:
             kept += chunk[:room]
+            if on_output is not None:
+                text += decoder.decode(chunk[:room])
+                on_output(text)
         if len(chunk) > room:
             truncated = True
     return bytes(kept), truncated
@@ -209,6 +227,7 @@ async def run_script(
     context: dict[str, Any],
     timeout: float,
     root: Path | None = None,
+    on_output: OutputCallback | None = None,
 ) -> ScriptResult:
     root = root or scripts_root()
     path, runner = resolve_script(name, root)
@@ -243,7 +262,7 @@ async def run_script(
         timed_out = False
         work = asyncio.gather(
             feed(),
-            _read_capped(process.stdout, MAX_OUTPUT_BYTES),  # type: ignore[arg-type]
+            _read_capped(process.stdout, MAX_OUTPUT_BYTES, on_output),  # type: ignore[arg-type]
             _read_capped(process.stderr, MAX_OUTPUT_BYTES),  # type: ignore[arg-type]
             process.wait(),
         )
@@ -277,9 +296,12 @@ def result_to_reply(name: str, result: ScriptResult, timeout: float) -> str:
         detail = f": {lines[-1][:300]}" if lines else ""
         raise ScriptError(f"`{name}` failed (exit code {result.exit_code}){detail}")
 
-    text = result.stdout.strip()
-    if not text:
-        return ":white_check_mark: Done."
-    if result.truncated or len(text) > MAX_REPLY_CHARS:
+    return clip_output(result.stdout, result.truncated) or ":white_check_mark: Done."
+
+
+def clip_output(text: str, truncated: bool = False) -> str:
+    """Script output cut down to what fits in one chat message."""
+    text = text.strip()
+    if text and (truncated or len(text) > MAX_REPLY_CHARS):
         text = text[:MAX_REPLY_CHARS].rstrip() + "\n… (output truncated)"
     return text

@@ -222,6 +222,13 @@ grow in bigger chunks instead of taking longer, because a user's next message wa
 their current reply has finished streaming. Short replies that fit in one chunk are posted
 whole. Reminders are always posted whole.
 
+**Script commands stream live.** In streaming mode a script's output is shown while it runs:
+the first line it prints is posted with the `▍` cursor, and the message is edited as more
+arrives, at most every *delay* ms and never more than twice a second. When the script exits
+the message becomes the final reply. If it fails or times out, what it printed stays and the
+warning is added below it. Python scripts run unbuffered, so a plain `print()` shows up right
+away; other languages should flush their output (`stdbuf -oL` for shell tools that buffer).
+
 Rocket.Chat has no native streaming, so this depends on two workspace settings
 (Administration → Settings → Message):
 

@@ -18,9 +18,11 @@ from app.bot.scripts import (
     result_to_reply,
     run_script,
 )
+from app.bot import streaming
+from app.bot.streaming import STREAM_CURSOR
 from app.bot.types import MessageContext
 from app.config import get_settings
-from app.models import MessageLog
+from app.models import BotConfig, MessageLog
 from app.rocketchat.ddp import IncomingMessage
 
 CONTEXT = {
@@ -189,6 +191,32 @@ async def test_huge_output_is_truncated(scripts):
     assert reply.endswith("(output truncated)")
 
 
+async def test_output_is_reported_as_it_is_printed(scripts):
+    # A plain print, no flush=True: the bot runs Python unbuffered.
+    write(scripts, "slow.py", "import time\nprint('one')\ntime.sleep(0.3)\nprint('two')")
+    seen: list[str] = []
+    result = await run_script(
+        "slow.py", args=[], context=CONTEXT, timeout=10, root=scripts, on_output=seen.append
+    )
+    assert seen == ["one\n", "one\ntwo\n"]
+    assert result.stdout == "one\ntwo\n"
+
+
+async def test_a_character_split_between_writes_arrives_whole(scripts):
+    write(
+        scripts,
+        "split.py",
+        "import sys, time\n"
+        "sys.stdout.buffer.write(b'Vi\\xe1'); sys.stdout.flush(); time.sleep(0.2)\n"
+        "sys.stdout.buffer.write(b'\\xbb\\x87t')",
+    )
+    seen: list[str] = []
+    await run_script("split.py", args=[], context=CONTEXT, timeout=10, root=scripts,
+                     on_output=seen.append)
+    assert seen[-1] == "Việt"
+    assert not any("\ufffd" in text for text in seen)
+
+
 async def test_no_output_is_confirmed(scripts):
     write(scripts, "quiet.sh", "true")
     assert result_to_reply("quiet.sh", await run(scripts, "quiet.sh"), 30) == ":white_check_mark: Done."
@@ -314,3 +342,87 @@ async def test_a_dry_run_names_the_script_without_running_it(scripts, admin_clie
     ).json()
     assert result["reply"] == "(dry run) would dispatch script `hello.py`"
     assert not marker.exists()
+
+
+# --------------------------------------------------------------------------- #
+# Streaming mode: output appears in chat while the script runs
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+async def live_mode(app_env, gateway, monkeypatch):
+    """Streaming replies on, and every message the bot posts recorded."""
+    monkeypatch.setattr(streaming, "LIVE_MIN_INTERVAL_SECONDS", 0.05)
+    async with app_env.session_factory() as session:
+        config = await session.get(BotConfig, 1)
+        config.reply_mode = "stream"
+        config.stream_interval_ms = 50
+        config.config_version += 1
+        await session.commit()
+    app_env.config_store.invalidate()
+
+    posted: list[str] = []
+    send = gateway.send_message
+
+    async def record(room_id, text, **kwargs):
+        posted.append(text)
+        return await send(room_id, text, **kwargs)
+
+    monkeypatch.setattr(gateway, "send_message", record)
+    return posted
+
+
+def hello(text: str = "hello") -> IncomingMessage:
+    return IncomingMessage(message_id="M1", room_id="R1", text=text, sender_id="U1",
+                           sender_username="bo", room_type="d")
+
+
+async def test_a_scripts_prints_appear_in_chat_while_it_runs(
+    scripts, admin_client, app_env, gateway, live_mode
+):
+    write(scripts, "hello.py", "import time\nprint('step 1')\ntime.sleep(0.3)\nprint('step 2')")
+    await admin_client.post("/api/commands", json=SCRIPT_COMMAND)
+    await app_env.bot._handle(hello())
+
+    # Posted once, with only the first line, then edited until complete.
+    assert live_mode == ["step 1" + STREAM_CURSOR]
+    assert len(gateway.sent) == 1 and gateway.last_text == "step 1\nstep 2"
+    async with app_env.session_factory() as session:
+        log = (await session.scalars(select(MessageLog))).one()
+    assert log.status == "ok" and log.text_out == "step 1\nstep 2"
+
+
+async def test_a_failure_after_some_output_keeps_the_output(
+    scripts, admin_client, app_env, gateway, live_mode
+):
+    write(scripts, "hello.py", "import sys, time\nprint('step 1')\ntime.sleep(0.2)\nsys.exit('boom')")
+    await admin_client.post("/api/commands", json=SCRIPT_COMMAND)
+    await app_env.bot._handle(hello())
+
+    assert len(gateway.sent) == 1
+    assert gateway.last_text == "step 1\n\n:warning: `hello.py` failed (exit code 1): boom"
+    async with app_env.session_factory() as session:
+        log = (await session.scalars(select(MessageLog))).one()
+    assert log.status == "error"
+
+
+async def test_a_silent_script_still_confirms_in_streaming_mode(
+    scripts, admin_client, app_env, gateway, live_mode
+):
+    write(scripts, "hello.py", "pass")
+    await admin_client.post("/api/commands", json=SCRIPT_COMMAND)
+    await app_env.bot._handle(hello())
+    assert live_mode == [":white_check_mark: Done."] and gateway.updates == []
+
+
+async def test_testing_a_script_in_the_portal_posts_nothing_in_streaming_mode(
+    scripts, admin_client, gateway, live_mode
+):
+    write(scripts, "hello.py", "import time\nprint('step 1')\ntime.sleep(0.2)\nprint('step 2')")
+    await admin_client.post("/api/commands", json=SCRIPT_COMMAND)
+
+    result = (
+        await admin_client.post("/api/commands/test", json={"text": "/hello", "dry_run": False})
+    ).json()
+    assert result["reply"] == "step 1\nstep 2"
+    assert live_mode == [] and gateway.updates == []

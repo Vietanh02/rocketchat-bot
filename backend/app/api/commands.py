@@ -256,7 +256,7 @@ async def test_command(
         )
 
     try:
-        reply = await runtime.bot.responder.respond(context)  # type: ignore[attr-defined]
+        reply = await runtime.bot.responder.respond(context, live=False)  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001 - reported back to the portal
         return CommandTestResult(
             matched=True,

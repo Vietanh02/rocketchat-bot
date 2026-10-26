@@ -332,6 +332,9 @@ class BotService:
     async def _send(self, context: MessageContext, reply: Reply) -> None:
         if self._gateway is None:
             raise RocketChatError("not connected to Rocket.Chat")
+        if reply.live is not None:
+            await reply.live.finish(reply.text)
+            return
         snapshot = await self._config_store.current()
         await deliver(
             self._gateway,
