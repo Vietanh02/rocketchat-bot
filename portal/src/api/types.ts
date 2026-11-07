@@ -36,13 +36,15 @@ export interface AccessCheckResult {
   reason: string;
 }
 
+export type ResponderMode = "rules" | "llm";
+
 export interface BotConfig {
   rc_rest_url: string;
   rc_ws_url: string;
   bot_user_id: string | null;
   bot_username: string | null;
   enabled: boolean;
-  responder_mode: string;
+  responder_mode: ResponderMode;
   greeting: string;
   fallback_reply: string;
   reply_in_thread: boolean;
@@ -55,11 +57,45 @@ export interface BotConfig {
   config_version: number;
   has_auth_token: boolean;
   has_password: boolean;
+  llm_available: boolean;
+  llm_model: string | null;
 }
 
-export interface BotConfigUpdate extends Partial<Omit<BotConfig, "config_version" | "has_auth_token" | "has_password">> {
+export interface BotConfigUpdate extends Partial<Omit<BotConfig, "config_version" | "has_auth_token" | "has_password" | "llm_available" | "llm_model">> {
   bot_auth_token?: string;
   bot_password?: string;
+}
+
+export interface LLMConfig {
+  enabled: boolean;
+  base_url: string;
+  model: string;
+  system_prompt: string;
+  timeout_seconds: number;
+  max_tokens: number | null;
+  temperature: number | null;
+  history_messages: number;
+  format_for_rocketchat: boolean;
+  has_api_key: boolean;
+  configured: boolean;
+  default_system_prompt: string;
+}
+
+export interface LLMConfigUpdate
+  extends Partial<Omit<LLMConfig, "has_api_key" | "configured" | "default_system_prompt">> {
+  /** Write-only. "" clears the stored key; omit to keep it. */
+  api_key?: string;
+}
+
+export interface LLMTestRequest extends Omit<LLMConfigUpdate, "enabled" | "history_messages"> {
+  prompt?: string;
+}
+
+export interface LLMTestResult {
+  ok: boolean;
+  message: string;
+  reply: string | null;
+  duration_ms: number | null;
 }
 
 export interface ConnectionStatus {
@@ -154,6 +190,7 @@ export interface Integration {
   auth_header_name: string | null;
   timeout_seconds: number;
   enabled: boolean;
+  llm_tool: boolean;
   has_secret: boolean;
   params: IntegrationParam[];
   created_at: string;

@@ -64,6 +64,7 @@ class IntegrationSpec:
     auth_secret: str | None = None  # decrypted
     timeout_seconds: float = 10.0
     params: list[ParamSpec] = field(default_factory=list)
+    llm_tool: bool = False
 
     @classmethod
     def from_model(cls, model: Integration) -> IntegrationSpec:
@@ -83,6 +84,7 @@ class IntegrationSpec:
             auth_header_name=model.auth_header_name,
             auth_secret=decrypt_secret(model.auth_secret_enc),
             timeout_seconds=model.timeout_seconds or 10.0,
+            llm_tool=bool(model.llm_tool),
             params=[
                 ParamSpec(
                     name=p.name,
@@ -101,25 +103,28 @@ class IntegrationSpec:
         ]
         return " ".join(parts)
 
-    def to_tool_schema(self) -> dict[str, Any]:
-        """Claude tool definition for this integration.
+    def to_tool_schema(self, name: str | None = None) -> dict[str, Any]:
+        """OpenAI-style function tool for this integration (see `app.bot.llm`).
 
-        Unused while the responder is rule-based; it is what an LLM responder
-        will hand to the Messages API so no schema change is needed later.
+        `name` overrides the integration's own name, which may contain
+        characters function names do not allow.
         """
         return {
-            "name": self.name,
-            "description": self.description or f"Call the {self.name} API",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    p.name: {
-                        "type": "string",
-                        "description": p.description or p.name,
-                    }
-                    for p in self.params
+            "type": "function",
+            "function": {
+                "name": name or self.name,
+                "description": self.description or f"Call the {self.name} API",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        p.name: {
+                            "type": "string",
+                            "description": p.description or p.name,
+                        }
+                        for p in self.params
+                    },
+                    "required": [p.name for p in self.params if p.required],
                 },
-                "required": [p.name for p in self.params if p.required],
             },
         }
 

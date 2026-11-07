@@ -5,8 +5,13 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, status
 
 from app.api.deps import AdminUser, CurrentUser, RuntimeDep, SessionDep, record_audit
-from app.bot.config_store import bump_config_version, ensure_bot_config
-from app.models import BotConfig
+from app.bot.config_store import (
+    LLMSettings,
+    bump_config_version,
+    ensure_bot_config,
+    ensure_llm_config,
+)
+from app.models import BotConfig, LLMConfig, ResponderMode
 from app.rocketchat.rest import RocketChatError, RocketChatRest
 from app.scheduler.triggers import ScheduleError, resolve_timezone
 from app.schemas import (
@@ -53,7 +58,8 @@ RECONNECT_FIELDS = frozenset(
 )
 
 
-def _to_out(config: BotConfig) -> BotConfigOut:
+def _to_out(config: BotConfig, llm: LLMConfig) -> BotConfigOut:
+    llm_settings = LLMSettings.from_model(llm)
     return BotConfigOut(
         rc_rest_url=config.rc_rest_url,
         rc_ws_url=config.rc_ws_url,
@@ -73,12 +79,17 @@ def _to_out(config: BotConfig) -> BotConfigOut:
         config_version=config.config_version,
         has_auth_token=bool(config.bot_auth_token_enc),
         has_password=bool(config.bot_password_enc),
+        llm_available=llm_settings.configured,
+        llm_model=llm_settings.model or None,
     )
 
 
 @router.get("", response_model=BotConfigOut)
 async def read_config(_: CurrentUser, session: SessionDep) -> BotConfigOut:
-    return _to_out(await ensure_bot_config(session))
+    config = await ensure_bot_config(session)
+    llm = await ensure_llm_config(session)
+    await session.commit()
+    return _to_out(config, llm)
 
 
 @router.put("", response_model=BotConfigOut)
@@ -89,7 +100,17 @@ async def update_config(
     runtime: RuntimeDep,
 ) -> BotConfigOut:
     config = await ensure_bot_config(session)
+    llm = await ensure_llm_config(session)
     changes = payload.model_dump(exclude_unset=True)
+
+    if (
+        changes.get("responder_mode") == ResponderMode.llm.value
+        and not LLMSettings.from_model(llm).configured
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="No language model is configured; set it up on the Language model page first.",
+        )
 
     if "default_timezone" in changes:
         try:
@@ -123,7 +144,7 @@ async def update_config(
 
     needs_reconnect = bool(RECONNECT_FIELDS & set(changes))
     await runtime.apply_config_change(reconnect=needs_reconnect)
-    return _to_out(config)
+    return _to_out(config, llm)
 
 
 async def build_status(runtime: RuntimeDep) -> ConnectionStatusOut:

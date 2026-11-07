@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
+import { Link } from "react-router-dom";
 import type { BotConfig, BotConfigUpdate, ReplyMode } from "../api/types";
 import { useAuth } from "../auth";
 import { Banner, Card, Checkbox, Field, Loading } from "../components/ui";
@@ -315,11 +316,13 @@ export default function SettingsPage() {
             </div>
           )}
 
-          <Field
-            label="Responder"
-            hint="Rule-based matching. An LLM responder can be added later without changing this data."
-          >
-            <input type="text" value={form.responder_mode} disabled readOnly />
+          <Field label="Unmatched messages">
+            <p className="hint" style={{ marginTop: 0 }}>
+              {form.responder_mode === "llm"
+                ? `Answered by the language model (${form.llm_model ?? "?"}) instead of the fallback reply.`
+                : "Get the fallback reply."}{" "}
+              <Link to="/llm">Language model settings</Link>
+            </p>
           </Field>
         </div>
       </Card>

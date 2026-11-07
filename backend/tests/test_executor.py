@@ -71,12 +71,15 @@ def test_usage_string_marks_required_and_optional():
     assert s.usage() == "<city> [units]"
 
 
-def test_tool_schema_is_claude_shaped():
+def test_tool_schema_is_an_openai_function():
     s = spec(params=[ParamSpec(name="city", required=True, description="City")])
     schema = s.to_tool_schema()
-    assert schema["name"] == "demo"
-    assert schema["input_schema"]["required"] == ["city"]
-    assert schema["input_schema"]["properties"]["city"]["description"] == "City"
+    assert schema["type"] == "function"
+    function = schema["function"]
+    assert function["name"] == "demo"
+    assert function["parameters"]["required"] == ["city"]
+    assert function["parameters"]["properties"]["city"]["description"] == "City"
+    assert s.to_tool_schema("demo_v2")["function"]["name"] == "demo_v2"
 
 
 # --------------------------------------------------------------------------- #

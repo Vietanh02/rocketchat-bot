@@ -1,31 +1,37 @@
 """Decides what the bot says.
 
 `Responder` is the seam for the bot's "brain". `RuleResponder` matches the
-commands configured in the portal; an `LLMResponder` can be added later behind
-the same protocol (see `IntegrationSpec.to_tool_schema`).
+commands configured in the portal. In "llm" mode, a message that matches none
+of them is answered by a language model (see `app.bot.llm`) instead of the
+fallback reply. Integrations marked "LLM tool" are the model's tools. The
+model's Markdown is rewritten for Rocket.Chat (`app.bot.rcformat`), both
+while it streams in and once it is complete.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.builtins import BuiltinContext, get_builtin
 from app.bot.config_store import ConfigSnapshot, ConfigStore
+from app.bot.llm import LLMChat, LLMError, LLMService, Toolbox
+from app.bot.rcformat import strip_thinking, to_rocketchat
 from app.bot.router import MatchResult
 from app.bot.scripts import ScriptError, clip_output, result_to_reply, run_script
 from app.bot.streaming import DeliveryOptions, LiveReply
 from app.bot.types import MessageContext, Reply
 from app.integrations.executor import (
     IntegrationError,
+    assert_url_allowed,
     bind_params,
     execute_integration,
 )
 from app.integrations.templating import TemplateRenderError, render
-from app.models import ResponseType
+from app.models import ResponderMode, ResponseType
 from app.rocketchat.gateway import Gateway
 from app.scheduler.service import SchedulerService
 
@@ -47,11 +53,14 @@ class RuleResponder:
         config_store: ConfigStore,
         gateway_provider: GatewayProvider,
         scheduler: SchedulerService | None = None,
+        llm: LLMService | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._config_store = config_store
         self._gateway_provider = gateway_provider
         self._scheduler = scheduler
+        # Configured in the portal; "llm" mode falls back to rules until it is.
+        self.llm = llm
 
     async def respond(self, message: MessageContext, *, live: bool = True) -> Reply | None:
         """`live=False` never posts while answering, as when the portal tests a command."""
@@ -67,11 +76,33 @@ class RuleResponder:
 
         match = snapshot.router.match(message.clean_text or message.text)
         if match is None:
+            chat = self._llm_chat(snapshot)
+            if chat is not None:
+                # Like the fallback: never chime in uninvited in a channel.
+                if not (message.is_direct or message.mentioned_bot):
+                    return None
+                return await self._with_live(
+                    message, snapshot, live, lambda lr: self._ask_llm(message, snapshot, lr, chat)
+                )
             return self._fallback(message, snapshot)
 
-        live_reply = self._live_reply(message, match, snapshot) if live else None
+        # In streaming mode, a script's output is shown while it runs.
+        live = live and match.command.response_type == ResponseType.script.value
+        return await self._with_live(
+            message, snapshot, live, lambda lr: self._answer(message, match, snapshot, lr)
+        )
+
+    async def _with_live(
+        self,
+        message: MessageContext,
+        snapshot: ConfigSnapshot,
+        live: bool,
+        answer: Callable[[LiveReply | None], Awaitable[Reply | None]],
+    ) -> Reply | None:
+        """Run `answer`, showing its output as it arrives when streaming is on."""
+        live_reply = self._live_reply(message, snapshot) if live else None
         try:
-            reply = await self._answer(message, match, snapshot, live_reply)
+            reply = await answer(live_reply)
         except BaseException:
             if live_reply is not None:
                 live_reply.abort()
@@ -120,6 +151,12 @@ class RuleResponder:
 
     # ----------------------------------------------------------------- #
 
+    def _llm_chat(self, snapshot: ConfigSnapshot) -> LLMChat | None:
+        """The model to ask about unmatched messages, if "llm" mode is on."""
+        if snapshot.settings.responder_mode != ResponderMode.llm.value or self.llm is None:
+            return None
+        return self.llm.chat_for(snapshot.llm)
+
     def _should_consider(
         self, message: MessageContext, snapshot: ConfigSnapshot
     ) -> bool:
@@ -147,11 +184,8 @@ class RuleResponder:
         return Reply(text="", denied=True)
 
     def _live_reply(
-        self, message: MessageContext, match: MatchResult, snapshot: ConfigSnapshot
+        self, message: MessageContext, snapshot: ConfigSnapshot
     ) -> LiveReply | None:
-        """In streaming mode, a script's output is shown while it runs."""
-        if match.command.response_type != ResponseType.script.value:
-            return None
         options = DeliveryOptions.from_settings(snapshot.settings)
         gateway = self._gateway_provider()
         if not options.streaming or gateway is None:
@@ -185,6 +219,62 @@ class RuleResponder:
         )
 
     # ----------------------------------------------------------------- #
+
+    async def _ask_llm(
+        self,
+        message: MessageContext,
+        snapshot: ConfigSnapshot,
+        live: LiveReply | None,
+        chat: LLMChat,
+    ) -> Reply | None:
+        assert self.llm is not None
+        question = message.clean_text or message.text
+        if not question.strip():
+            return None
+        if not message.is_direct and message.sender_username:
+            # Several people share a channel's conversation; say who is talking.
+            question = f"@{message.sender_username}: {question}"
+        try:
+            # Same guard as integrations: no probing the host's private network.
+            await assert_url_allowed(snapshot.llm.base_url)
+        except IntegrationError as exc:
+            error = f"the language model gateway is not allowed: {exc}"
+            log.warning("LLM reply refused: %s", error)
+            return self._reply(message, f":warning: {error}", None, snapshot, error=error)
+
+        memory = self.llm.memory
+        key = (message.room_id, self._thread_for(message, snapshot))
+        messages = chat.build_messages(
+            question,
+            memory.history(key),
+            bot_name=snapshot.settings.bot_username or "the bot",
+        )
+        tools = Toolbox(
+            (spec for spec in snapshot.integrations.values() if spec.llm_tool),
+            message.template_vars(),
+        )
+        if snapshot.llm.format_for_rocketchat:
+            shape = to_rocketchat
+        else:
+            def shape(text: str, *, partial: bool = False) -> str:
+                return strip_thinking(text, partial=partial)
+
+        try:
+            raw = await chat.complete(
+                messages,
+                on_text=None if live is None else lambda so_far: live.push(shape(so_far, partial=True)),
+                tools=tools or None,
+            )
+        except LLMError as exc:
+            log.info("LLM reply failed: %s", exc)
+            return self._reply(message, f":warning: {exc}", None, snapshot, error=str(exc))
+        text = shape(raw).strip()
+        if not text:
+            error = "the language model returned an empty answer"
+            return self._reply(message, f":warning: {error}", None, snapshot, error=error)
+        # The model's own words, so it keeps writing standard Markdown.
+        memory.remember(key, question, strip_thinking(raw).strip())
+        return self._reply(message, text, None, snapshot)
 
     async def _render(
         self,

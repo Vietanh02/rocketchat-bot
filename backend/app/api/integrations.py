@@ -45,6 +45,7 @@ SCALAR_FIELDS = (
     "auth_header_name",
     "timeout_seconds",
     "enabled",
+    "llm_tool",
     *TEMPLATE_FIELDS,
 )
 

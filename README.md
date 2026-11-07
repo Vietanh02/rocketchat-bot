@@ -343,10 +343,62 @@ Two problems in the pre-existing Rocket.Chat stack, found while testing against 
 Interactive docs at `/docs` on the backend (`http://localhost:8000/docs` in development).
 `GET /healthz` is unauthenticated and reports bot and scheduler state.
 
-## Extending: an LLM responder
+## LLM responder
 
-The responder is pluggable. `RuleResponder` in `app/bot/responder.py` implements the
-`Responder` protocol (`async def respond(message) -> Reply | None`); an `LLMResponder` can be
-added alongside it and selected via `bot_config.responder_mode` without a schema change.
-`IntegrationSpec.to_tool_schema()` already renders each configured integration as a Claude
-tool definition, so the integrations an admin has configured become the model's tools.
+A language model service built into the backend. With it on, configured commands still
+answer first; any DM or @mention that matches none of them is answered by the model instead
+of getting the fallback reply. Everything is set on the portal's **Language model** page:
+
+| Setting | |
+|---|---|
+| Answer unmatched messages | On/off. Needs gateway, key and model. |
+| API gateway | Any OpenAI-compatible chat-completions base URL, e.g. `https://localcal.ai/aigw/ai/v1`. Same private-host rule as integrations. |
+| API key | Stored encrypted, never shown again. Leave blank to keep, clear to remove. |
+| Model | Whichever model the gateway serves, e.g. `glm-4.6`. |
+| Timeout | Seconds to wait for the gateway: for the whole answer, or when streaming, for the first token and between tokens. No retries, so this is the real wait. |
+| System prompt | `{bot}` becomes the bot's username. Empty uses a built-in prompt. |
+| Max tokens, temperature | Empty leaves the gateway's default. |
+| History | Earlier messages of the conversation sent with each question (0 = none). |
+| Format for Rocket.Chat | Rewrites the model's Markdown (see below). |
+
+**Test** sends one question with the values on the form, saved or not, and shows the answer
+as it would be posted. Changes apply to the next message; no restart is needed.
+
+`APP_LLM_*` in `backend/.env` only seeds these settings when the database is first created.
+
+### Rocket.Chat formatting
+
+Models write standard Markdown, which Rocket.Chat renders differently (`*x*` is bold there,
+tables and headings show as raw symbols). With formatting on, the answer is rewritten:
+`**bold**` → `*bold*`, `*italic*` → `_italic_`, `~~x~~` → `~x~`, headings → bold lines,
+`* item` → `- item`, tables → aligned columns in a code block, images → links, `<br>` → line
+breaks, and a reasoning model's `<think>…</think>` is removed. Code and URLs are untouched.
+The model is told to write standard Markdown and remembers its own words, not the rewrite.
+Turn it off if your system prompt already asks for Rocket.Chat syntax.
+
+### Streaming
+
+With **Settings → Reply style** on streaming, the answer is typed out in the message as the
+model produces it, using the same characters-per-update and delay settings as other replies.
+Formatting is applied as it streams: unfinished `<think>` blocks and table rows are held back
+until complete, so the message does not flicker between raw and formatted text.
+
+- Each DM, thread or channel keeps its last few messages in memory so follow-ups make sense;
+  this is lost on restart. In channels each question is prefixed with the sender's `@username`.
+- Errors (timeout, HTTP status) are shown as a short warning and logged; the key never is.
+
+### Integrations as tools
+
+Tick **LLM tool** on an integration (Integrations page) and the model may call it on its own,
+for questions like "what's the weather in Hanoi?". Its description and parameter descriptions
+become the tool's documentation, so write them for the model. The call goes through the same
+parameter binding, templates (`{{ user.username }}` is the person asking) and private-host guard
+as a command; the JSON response, or the error, goes back to the model, which then answers.
+At most 5 rounds of tool calls are made per answer.
+
+Exposure is opt-in because the model decides when to call: anyone allowed to chat with the
+bot can get it to call a ticked integration with arguments of their choosing. Leave write
+endpoints (POST/DELETE) unticked unless that is acceptable.
+
+The code lives in `app/bot/llm.py` (service), `app/bot/rcformat.py` (formatting) and
+`app/api/llm.py` (portal API).

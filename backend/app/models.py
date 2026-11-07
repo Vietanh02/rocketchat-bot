@@ -95,7 +95,7 @@ class AccessMode(str, enum.Enum):
 
 class ResponderMode(str, enum.Enum):
     rules = "rules"
-    llm = "llm"  # reserved: no implementation ships yet
+    llm = "llm"  # commands first; anything unmatched goes to the language model
 
 
 # --------------------------------------------------------------------------- #
@@ -156,6 +156,34 @@ class BotConfig(Base, TimestampMixin):
     )
     # Config generation; bumped on every portal write so caches invalidate.
     config_version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class LLMConfig(Base, TimestampMixin):
+    """The language model service (single row, id == 1).
+
+    Any OpenAI-compatible chat-completions gateway. Whether the bot uses it is
+    `BotConfig.responder_mode == "llm"`; this row only says how to reach it.
+    """
+
+    __tablename__ = "llm_config"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    # Base URL of the API, up to and including the version, e.g. https://host/v1.
+    base_url: Mapped[str] = mapped_column(String(512), default="")
+    # Fernet ciphertext; never returned by the API in plaintext.
+    api_key_enc: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(String(256), default="")
+    # "{bot}" is replaced with the bot's username. Empty uses a built-in prompt.
+    system_prompt: Mapped[str] = mapped_column(Text, default="")
+    # How long to wait for the gateway: for the whole answer, or when
+    # streaming, for the first token and between tokens.
+    timeout_seconds: Mapped[float] = mapped_column(Float, default=60.0)
+    max_tokens: Mapped[int | None] = mapped_column(Integer)
+    temperature: Mapped[float | None] = mapped_column(Float)
+    # Earlier messages of the conversation sent with each question.
+    history_messages: Mapped[int] = mapped_column(Integer, default=10)
+    # Rewrite the model's Markdown into what Rocket.Chat renders.
+    format_for_rocketchat: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class BotAccessEntry(Base, TimestampMixin):
@@ -235,6 +263,8 @@ class Integration(Base, TimestampMixin):
 
     timeout_seconds: Mapped[float] = mapped_column(Float, default=10.0)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Offered to the language model as a tool it may call on its own.
+    llm_tool: Mapped[bool] = mapped_column(Boolean, default=False)
 
     commands: Mapped[list[Command]] = relationship(back_populates="integration")
     params: Mapped[list[IntegrationParam]] = relationship(

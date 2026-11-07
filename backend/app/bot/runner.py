@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.config_store import BotSettingsSnapshot, ConfigStore
+from app.bot.llm import LLMService
 from app.bot.responder import Responder, RuleResponder
 from app.bot.streaming import DeliveryOptions, deliver
 from app.bot.types import MessageContext, Reply
@@ -74,7 +75,11 @@ class BotService:
         self._handled = 0
 
         self.responder: Responder = RuleResponder(
-            session_factory, config_store, self.gateway, scheduler
+            session_factory,
+            config_store,
+            self.gateway,
+            scheduler,
+            llm=LLMService(),
         )
 
     # ----------------------------------------------------------------- #

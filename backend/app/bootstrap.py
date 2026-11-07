@@ -11,7 +11,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.bot.config_store import ensure_bot_config
+from app.bot.config_store import ensure_bot_config, ensure_llm_config
 from app.config import Settings, get_settings
 from app.db import Base, engine
 from app.models import Command, MatchMode, PortalUser, ResponseType, Role, TriggerType
@@ -148,6 +148,7 @@ async def run_bootstrap(
     await create_schema()
     async with session_factory() as session:
         await ensure_bot_config(session, settings)
+        await ensure_llm_config(session, settings)
         await ensure_admin(session, settings)
         await seed_default_commands(session)
         await session.commit()

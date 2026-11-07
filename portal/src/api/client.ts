@@ -13,6 +13,10 @@ import type {
   Integration,
   IntegrationDraft,
   IntegrationTestResult,
+  LLMConfig,
+  LLMConfigUpdate,
+  LLMTestRequest,
+  LLMTestResult,
   MessageLogEntry,
   ScriptList,
   Task,
@@ -124,6 +128,10 @@ export const api = {
   restartBot: () => post<ConnectionStatus>("/api/config/restart"),
   testConnection: (payload: Record<string, string | undefined>) =>
     post<ConnectionTestResult>("/api/config/test", payload),
+
+  getLLM: () => get<LLMConfig>("/api/llm"),
+  updateLLM: (changes: LLMConfigUpdate) => put<LLMConfig>("/api/llm", changes),
+  testLLM: (payload: LLMTestRequest) => post<LLMTestResult>("/api/llm/test", payload),
 
   listAccess: () => get<AccessEntry[]>("/api/access"),
   addAccess: (usernames: string, note = "") =>

@@ -9,6 +9,7 @@ import AccessPage from "./pages/Access";
 import CommandsPage from "./pages/Commands";
 import DashboardPage from "./pages/Dashboard";
 import IntegrationsPage from "./pages/Integrations";
+import LLMPage from "./pages/LLM";
 import LoginPage from "./pages/Login";
 import LogsPage from "./pages/Logs";
 import SettingsPage from "./pages/Settings";
@@ -26,6 +27,7 @@ function App() {
         <Route path="/" element={<DashboardPage />} />
         <Route path="/commands" element={<CommandsPage />} />
         <Route path="/integrations" element={<IntegrationsPage />} />
+        <Route path="/llm" element={<LLMPage />} />
         <Route path="/tasks" element={<TasksPage />} />
         <Route path="/access" element={<AccessPage />} />
         <Route path="/logs" element={<LogsPage />} />

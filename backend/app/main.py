@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import access, auth, commands, config as config_api, integrations, logs, tasks
+from app.api import access, auth, commands, config as config_api, integrations, llm, logs, tasks
 from app.bootstrap import run_bootstrap
 from app.config import get_settings
 from app.db import SessionLocal
@@ -63,6 +63,7 @@ def create_app() -> FastAPI:
     app.include_router(config_api.router)
     app.include_router(commands.router)
     app.include_router(integrations.router)
+    app.include_router(llm.router)
     app.include_router(tasks.router)
     app.include_router(logs.router)
     app.include_router(access.router)

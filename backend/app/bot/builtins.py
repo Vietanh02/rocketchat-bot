@@ -20,7 +20,8 @@ from app.bot.config_store import ConfigSnapshot
 from app.bot.remind_parser import RemindParseError, parse_reminder
 from app.bot.router import MatchResult
 from app.bot.types import MessageContext
-from app.models import ScheduledTask
+from app.config import get_settings
+from app.models import ResponderMode, ScheduledTask
 from app.rocketchat.gateway import Gateway
 from app.scheduler.triggers import ScheduleError, describe
 from app.timeutil import format_local, to_utc
@@ -104,10 +105,13 @@ async def status_command(ctx: BuiltinContext) -> str:
     scheduler_state = (
         "running" if ctx.scheduler and ctx.scheduler.running else "stopped"
     )
+    responder = f"`{settings.responder_mode}`"
+    if settings.responder_mode == ResponderMode.llm.value:
+        responder += f" ({get_settings().llm_model or 'no model configured'})"
     return "\n".join(
         [
             "**Bot status**",
-            f"- responder: `{settings.responder_mode}`",
+            f"- responder: {responder}",
             f"- commands loaded: {len(ctx.snapshot.router)}",
             f"- integrations: {len(ctx.snapshot.integrations)}",
             f"- scheduler: {scheduler_state}",

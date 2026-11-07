@@ -6,6 +6,7 @@ Secrets are write-only: clients send `auth_secret`, and read back only
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
@@ -22,7 +23,6 @@ from app.models import (
     ActionType,
     AuthType,
     MatchMode,
-    ResponderMode,
     ResponseType,
     ScheduleKind,
     TriggerType,
@@ -104,6 +104,10 @@ class BotConfigOut(BaseModel):
     config_version: int
     has_auth_token: bool = False
     has_password: bool = False
+    # Whether the language model is configured, so "llm" can be selected,
+    # and the model it uses.
+    llm_available: bool = False
+    llm_model: str | None = None
 
 
 class BotConfigUpdate(BaseModel):
@@ -127,14 +131,79 @@ class BotConfigUpdate(BaseModel):
     stream_interval_ms: int | None = Field(default=None, ge=50, le=5000)
     access_mode: Literal["everyone", "allowlist", "blocklist"] | None = None
 
-    @field_validator("responder_mode")
+
+def _gateway_url(value: str | None) -> str | None:
+    """An OpenAI-compatible base URL, without the trailing slash."""
+    if value is None:
+        return None
+    value = value.strip().rstrip("/")
+    if value and not re.match(r"^https?://[^\s/]+", value):
+        raise ValueError("must be an http:// or https:// URL")
+    return value
+
+
+class LLMConfigOut(BaseModel):
+    # Answer messages that match no command with the model ("llm" responder).
+    enabled: bool
+    base_url: str
+    model: str
+    system_prompt: str
+    timeout_seconds: float
+    max_tokens: int | None = None
+    temperature: float | None = None
+    history_messages: int
+    format_for_rocketchat: bool
+    has_api_key: bool
+    # Gateway, key and model are all set.
+    configured: bool
+    # What an empty system prompt stands for.
+    default_system_prompt: str
+
+
+class LLMConfigUpdate(BaseModel):
+    enabled: bool | None = None
+    base_url: str | None = Field(default=None, max_length=512)
+    # Write-only. "" clears the stored key; omit to leave it unchanged.
+    api_key: str | None = Field(default=None, max_length=4096)
+    model: str | None = Field(default=None, max_length=256)
+    system_prompt: str | None = Field(default=None, max_length=20000)
+    timeout_seconds: float | None = Field(default=None, ge=1, le=600)
+    # null clears these, leaving the gateway's default.
+    max_tokens: int | None = Field(default=None, ge=1, le=200000)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    history_messages: int | None = Field(default=None, ge=0, le=100)
+    format_for_rocketchat: bool | None = None
+
+    _base_url = field_validator("base_url")(classmethod(lambda cls, v: _gateway_url(v)))
+
+    @field_validator("model")
     @classmethod
-    def _rules_only(cls, value: str | None) -> str | None:
-        if value == ResponderMode.llm.value:
-            raise ValueError(
-                "the LLM responder is not implemented yet; use 'rules'"
-            )
-        return value
+    def _strip(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
+
+
+class LLMTestRequest(BaseModel):
+    """Try the gateway; anything omitted comes from what is saved."""
+
+    base_url: str | None = Field(default=None, max_length=512)
+    api_key: str | None = Field(default=None, max_length=4096)
+    model: str | None = Field(default=None, max_length=256)
+    system_prompt: str | None = Field(default=None, max_length=20000)
+    timeout_seconds: float | None = Field(default=None, ge=1, le=600)
+    max_tokens: int | None = Field(default=None, ge=1, le=200000)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    format_for_rocketchat: bool | None = None
+    prompt: str = Field(default="Reply with one short sentence to say you are working.", min_length=1, max_length=4000)
+
+    _base_url = field_validator("base_url")(classmethod(lambda cls, v: _gateway_url(v)))
+
+
+class LLMTestResult(BaseModel):
+    ok: bool
+    message: str
+    # The answer as it would be posted in Rocket.Chat.
+    reply: str | None = None
+    duration_ms: int | None = None
 
 
 class AccessEntryOut(BaseModel):
@@ -307,6 +376,7 @@ class IntegrationBase(BaseModel):
     auth_header_name: str | None = Field(default=None, max_length=64)
     timeout_seconds: float = Field(default=10.0, gt=0, le=120)
     enabled: bool = True
+    llm_tool: bool = False
 
 
 class IntegrationCreate(IntegrationBase):
@@ -330,6 +400,7 @@ class IntegrationUpdate(BaseModel):
     auth_secret: str | None = None  # "" clears it; omit to keep
     timeout_seconds: float | None = Field(default=None, gt=0, le=120)
     enabled: bool | None = None
+    llm_tool: bool | None = None
     params: list[IntegrationParamIn] | None = None
 
 

@@ -203,11 +203,6 @@ async def test_an_unknown_timezone_is_rejected(admin_client):
     assert response.status_code == 422
 
 
-async def test_the_llm_responder_is_not_selectable_yet(admin_client):
-    response = await admin_client.put("/api/config", json={"responder_mode": "llm"})
-    assert response.status_code == 422
-
-
 async def test_status_reports_the_missing_connection(admin_client):
     body = (await admin_client.get("/api/config/status")).json()
     assert body["connected"] is False

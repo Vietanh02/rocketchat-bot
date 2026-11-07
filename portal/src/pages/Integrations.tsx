@@ -20,6 +20,7 @@ const BLANK: IntegrationDraft = {
   auth_header_name: null,
   timeout_seconds: 10,
   enabled: true,
+  llm_tool: false,
   params: [],
 };
 
@@ -400,7 +401,18 @@ export default function IntegrationsPage() {
                 checked={editing.draft.enabled}
                 onChange={(value) => patchDraft({ enabled: value })}
               />
+              <Checkbox
+                label="LLM tool: the language model may call this on its own"
+                checked={editing.draft.llm_tool}
+                onChange={(value) => patchDraft({ llm_tool: value })}
+              />
             </div>
+            {editing.draft.llm_tool && (
+              <p className="muted">
+                The model fills in the parameters from the conversation, so describe the integration
+                and each parameter clearly. Anyone who can chat with the bot can make it call this.
+              </p>
+            )}
 
             <div className="row">
               <button className="primary" type="submit" disabled={busy}>
@@ -530,7 +542,15 @@ export default function IntegrationsPage() {
                         </>
                       )}
                     </td>
-                    <td>{integration.enabled ? <Pill kind="ok">on</Pill> : <Pill>off</Pill>}</td>
+                    <td>
+                      {integration.enabled ? <Pill kind="ok">on</Pill> : <Pill>off</Pill>}
+                      {integration.llm_tool && (
+                        <>
+                          {" "}
+                          <Pill>LLM tool</Pill>
+                        </>
+                      )}
+                    </td>
                     {isAdmin && (
                       <td>
                         <div className="row">

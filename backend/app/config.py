@@ -48,6 +48,19 @@ class Settings(BaseSettings):
     # say). Nothing else from the bot's environment reaches them.
     script_env_passthrough: str = ""
 
+    # Language model behind an OpenAI-compatible API. Only seeds `llm_config`
+    # when the database is created; the portal's Language model page owns it.
+    llm_base_url: str = ""
+    llm_api_key: str = ""
+    llm_model: str = ""
+    # "{bot}" is replaced with the bot's username. Empty uses a built-in prompt.
+    llm_system_prompt: str = ""
+    llm_timeout_seconds: float = Field(default=60.0, gt=0)
+    llm_max_tokens: int | None = Field(default=None, ge=1)
+    llm_temperature: float | None = Field(default=None, ge=0, le=2)
+    # Earlier messages (questions and answers) sent along with each question.
+    llm_history_messages: int = Field(default=10, ge=0, le=100)
+
     # Bot runtime
     bot_enabled: bool = True
     inbound_queue_size: int = 500
@@ -57,6 +70,10 @@ class Settings(BaseSettings):
     @property
     def script_env_passthrough_list(self) -> list[str]:
         return [n.strip() for n in self.script_env_passthrough.split(",") if n.strip()]
+
+    @property
+    def llm_configured(self) -> bool:
+        return bool(self.llm_base_url and self.llm_api_key and self.llm_model)
 
     @property
     def cors_origin_list(self) -> list[str]:

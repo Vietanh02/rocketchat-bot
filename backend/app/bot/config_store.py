@@ -20,12 +20,20 @@ from app.bot.access import AccessPolicy
 from app.bot.router import Router
 from app.config import Settings, get_settings
 from app.integrations.executor import IntegrationSpec
-from app.models import BotAccessEntry, BotConfig, Command, Integration, ResponderMode
+from app.models import (
+    BotAccessEntry,
+    BotConfig,
+    Command,
+    Integration,
+    LLMConfig,
+    ResponderMode,
+)
 from app.security import decrypt_secret, encrypt_secret
 
 log = logging.getLogger(__name__)
 
 BOT_CONFIG_ID = 1
+LLM_CONFIG_ID = 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -76,11 +84,45 @@ class BotSettingsSnapshot:
 
 
 @dataclass(slots=True, frozen=True)
+class LLMSettings:
+    """How to reach the language model; see `app.models.LLMConfig`."""
+
+    base_url: str = ""
+    api_key: str | None = None
+    model: str = ""
+    system_prompt: str = ""
+    timeout_seconds: float = 60.0
+    max_tokens: int | None = None
+    temperature: float | None = None
+    history_messages: int = 10
+    format_for_rocketchat: bool = True
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.api_key and self.model)
+
+    @classmethod
+    def from_model(cls, model: LLMConfig) -> LLMSettings:
+        return cls(
+            base_url=(model.base_url or "").strip(),
+            api_key=decrypt_secret(model.api_key_enc),
+            model=(model.model or "").strip(),
+            system_prompt=model.system_prompt or "",
+            timeout_seconds=model.timeout_seconds,
+            max_tokens=model.max_tokens,
+            temperature=model.temperature,
+            history_messages=model.history_messages,
+            format_for_rocketchat=model.format_for_rocketchat,
+        )
+
+
+@dataclass(slots=True, frozen=True)
 class ConfigSnapshot:
     settings: BotSettingsSnapshot
     router: Router
     integrations: dict[int, IntegrationSpec]
     access: AccessPolicy = AccessPolicy()
+    llm: LLMSettings = LLMSettings()
 
     def integration_by_name(self, name: str) -> IntegrationSpec | None:
         folded = name.casefold()
@@ -117,6 +159,34 @@ async def ensure_bot_config(
     return config
 
 
+async def ensure_llm_config(
+    session: AsyncSession, settings: Settings | None = None
+) -> LLMConfig:
+    """Fetch the singleton LLM row, seeding it from APP_LLM_* once."""
+    settings = settings or get_settings()
+    config = await session.get(LLMConfig, LLM_CONFIG_ID)
+    if config is not None:
+        return config
+
+    config = LLMConfig(
+        id=LLM_CONFIG_ID,
+        base_url=settings.llm_base_url,
+        api_key_enc=encrypt_secret(settings.llm_api_key or None),
+        model=settings.llm_model,
+        system_prompt=settings.llm_system_prompt,
+        timeout_seconds=settings.llm_timeout_seconds,
+        max_tokens=settings.llm_max_tokens,
+        temperature=settings.llm_temperature,
+        history_messages=settings.llm_history_messages,
+        format_for_rocketchat=True,
+    )
+    session.add(config)
+    await session.flush()
+    if settings.llm_configured:
+        log.info("Seeded llm_config from environment")
+    return config
+
+
 async def bump_config_version(session: AsyncSession) -> int:
     """Signal every cache that configuration changed."""
     config = await ensure_bot_config(session)
@@ -149,8 +219,10 @@ class ConfigStore:
         async with self._lock:
             async with self._session_factory() as session:
                 config = await ensure_bot_config(session)
+                llm_config = await ensure_llm_config(session)
                 await session.commit()
                 await session.refresh(config)
+                await session.refresh(llm_config)
 
                 commands = list(
                     (await session.scalars(select(Command).order_by(Command.priority, Command.id))).all()
@@ -178,6 +250,7 @@ class ConfigStore:
                     m.id: IntegrationSpec.from_model(m) for m in integration_models
                 },
                 access=AccessPolicy(mode=config.access_mode, usernames=access_usernames),
+                llm=LLMSettings.from_model(llm_config),
             )
             self._snapshot = snapshot
             log.debug(
