@@ -8,7 +8,9 @@ services:
       - ROOT_URL=http://localhost:3000
       - PORT=3000
     depends_on:
-      - mongodb
+      mongodb:
+        # Wait until the replica set has a primary, or Rocket.Chat crash-loops.
+        condition: service_healthy
     ports:
       - "3000:3000"
 
@@ -16,5 +18,23 @@ services:
     image: mongodb/mongodb-community-server:8.0-ubi8
     restart: always
     volumes:
-      - ./mongo_data:/var/lib/mongo
+      - ./mongo_data:/data/db
     command: mongod --replSet rs0 --oplogSize 128
+    # Rocket.Chat needs a replica set. On a fresh data dir, initiate rs0;
+    # afterwards the config lives in mongo_data and this only checks it.
+    # Healthy once this node is the writable primary.
+    healthcheck:
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
+        - >-
+          try { rs.status() } catch (e) {
+          rs.initiate({_id: "rs0", members: [{_id: 0, host: "mongodb:27017"}]}) }
+          quit(db.hello().isWritablePrimary ? 0 : 1)
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+      start_interval: 2s
