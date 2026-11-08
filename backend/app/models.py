@@ -679,10 +679,18 @@ class KnowledgeConfig(Base, TimestampMixin):
     min_score: Mapped[float] = mapped_column(Float, default=0.3)
     # How questions are told apart from requests to do something.
     intent_mode: Mapped[str] = mapped_column(String(16), default=IntentMode.rules.value)
+    # The language model groups documents into sections and writes their
+    # titles, keywords and likely questions for the search index.
+    llm_index: Mapped[bool] = mapped_column(Boolean, default=True)
+    # The language model picks, among what search found, the passages that
+    # answer the question.
+    llm_judge: Mapped[bool] = mapped_column(Boolean, default=True)
+    # The model for both; empty uses the fast model, else the main one.
+    index_model: Mapped[str] = mapped_column(String(256), default="")
 
 
 class KbDocument(Base, TimestampMixin):
-    """One uploaded document.
+    """One uploaded document; its text and passages are `KbSource` and `KbPassage`.
 
     `scope` is "base" for the knowledge base set up on the portal, or
     "conv:<session key>" for a document someone sent in a conversation,
@@ -702,6 +710,7 @@ class KbDocument(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(16), default="ready")  # ready|error
     error: Mapped[str | None] = mapped_column(Text)
     pages: Mapped[int | None] = mapped_column(Integer)
+    # Passages.
     chunks: Mapped[int] = mapped_column(Integer, default=0)
     chars: Mapped[int] = mapped_column(Integer, default=0)
     truncated: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -709,10 +718,45 @@ class KbDocument(Base, TimestampMixin):
     uploaded_by: Mapped[str | None] = mapped_column(String(255))
 
 
-class KbChunk(Base):
-    """One passage of a document, the unit that is searched and cited."""
+class KbSource(Base):
+    """A document's whole text, which its passages are cut from, and how far along it is.
 
-    __tablename__ = "kb_chunk"
+    `stage`: "queued" (waiting for the language model to index it),
+    "indexing", "indexed", "basic" (cut by its headings only, because model
+    indexing is off or not available) or "failed" (the model could not; the
+    heading cut stays in use).
+    """
+
+    __tablename__ = "kb_source"
+
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("kb_document.id", ondelete="CASCADE"), primary_key=True
+    )
+    text: Mapped[str] = mapped_column(Text)
+    # [[start, end, kind, page, level, header], ...]; see app.knowledge.chunking.Block.
+    blocks_json: Mapped[str] = mapped_column(Text, default="[]")
+    # The uploaded file, kept so the document can be read again.
+    file_path: Mapped[str | None] = mapped_column(String(600))
+    stage: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    stage_error: Mapped[str | None] = mapped_column(Text)
+    # The model that indexed it, and windows where it fell back to headings.
+    indexed_by: Mapped[str] = mapped_column(String(256), default="")
+    fallback_windows: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class KbPassage(Base):
+    """One passage: `text` is exactly `kb_source.text[start:end]`.
+
+    Everything else describes it for search: its section's title, summary,
+    keywords and likely questions (written by the language model, or the
+    heading path when it did not index the document), and `context`, the
+    header of a table it continues.
+    """
+
+    __tablename__ = "kb_passage"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     document_id: Mapped[int] = mapped_column(
@@ -721,32 +765,43 @@ class KbChunk(Base):
     # Copied from the document, so searches filter without a join.
     scope: Mapped[str] = mapped_column(String(300), index=True)
     ord: Mapped[int] = mapped_column(Integer)
-    text: Mapped[str] = mapped_column(Text)
-    heading: Mapped[str] = mapped_column(String(300), default="")
+    section_ord: Mapped[int] = mapped_column(Integer, default=0)
+    start: Mapped[int] = mapped_column(Integer)
+    end: Mapped[int] = mapped_column(Integer)
     page: Mapped[int | None] = mapped_column(Integer)
-    # The embedding model its vector was made with; "" when it has none yet.
+    text: Mapped[str] = mapped_column(Text)
+    context: Mapped[str] = mapped_column(Text, default="")
+    section: Mapped[str] = mapped_column(String(300), default="")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    # Space separated, for word search.
+    keywords: Mapped[str] = mapped_column(Text, default="")
+    # One per line.
+    questions: Mapped[str] = mapped_column(Text, default="")
+    # The embedding model its vectors were made with; "" when it has none yet.
     embedded_model: Mapped[str] = mapped_column(String(64), default="", index=True)
 
 
-# Word search over passages, kept in step by triggers like agent_memory_fts.
+# Word search over passages and what describes them; kept in step by triggers.
+_KB_COLUMNS = "text, section, keywords, questions, summary"
 KB_FTS_DDL = (
-    "CREATE VIRTUAL TABLE IF NOT EXISTS kb_chunk_fts USING fts5("
-    "text, heading, content='kb_chunk', content_rowid='id', "
-    "tokenize='unicode61 remove_diacritics 2')",
-    "CREATE TRIGGER IF NOT EXISTS kb_chunk_ai AFTER INSERT ON kb_chunk BEGIN "
-    "INSERT INTO kb_chunk_fts(rowid, text, heading) VALUES (new.id, new.text, new.heading); END",
-    "CREATE TRIGGER IF NOT EXISTS kb_chunk_ad AFTER DELETE ON kb_chunk BEGIN "
-    "INSERT INTO kb_chunk_fts(kb_chunk_fts, rowid, text, heading) "
-    "VALUES ('delete', old.id, old.text, old.heading); END",
-    "CREATE TRIGGER IF NOT EXISTS kb_chunk_au AFTER UPDATE OF text, heading ON kb_chunk BEGIN "
-    "INSERT INTO kb_chunk_fts(kb_chunk_fts, rowid, text, heading) "
-    "VALUES ('delete', old.id, old.text, old.heading); "
-    "INSERT INTO kb_chunk_fts(rowid, text, heading) VALUES (new.id, new.text, new.heading); END",
+    f"CREATE VIRTUAL TABLE IF NOT EXISTS kb_passage_fts USING fts5({_KB_COLUMNS}, "
+    "content='kb_passage', content_rowid='id', tokenize='unicode61 remove_diacritics 2')",
+    "CREATE TRIGGER IF NOT EXISTS kb_passage_ai AFTER INSERT ON kb_passage BEGIN "
+    f"INSERT INTO kb_passage_fts(rowid, {_KB_COLUMNS}) "
+    "VALUES (new.id, new.text, new.section, new.keywords, new.questions, new.summary); END",
+    "CREATE TRIGGER IF NOT EXISTS kb_passage_ad AFTER DELETE ON kb_passage BEGIN "
+    f"INSERT INTO kb_passage_fts(kb_passage_fts, rowid, {_KB_COLUMNS}) "
+    "VALUES ('delete', old.id, old.text, old.section, old.keywords, old.questions, old.summary); END",
+    f"CREATE TRIGGER IF NOT EXISTS kb_passage_au AFTER UPDATE OF {_KB_COLUMNS} ON kb_passage BEGIN "
+    f"INSERT INTO kb_passage_fts(kb_passage_fts, rowid, {_KB_COLUMNS}) "
+    "VALUES ('delete', old.id, old.text, old.section, old.keywords, old.questions, old.summary); "
+    f"INSERT INTO kb_passage_fts(rowid, {_KB_COLUMNS}) "
+    "VALUES (new.id, new.text, new.section, new.keywords, new.questions, new.summary); END",
 )
 for _statement in KB_FTS_DDL:
-    event.listen(KbChunk.__table__, "after_create", DDL(_statement).execute_if(dialect="sqlite"))
+    event.listen(KbPassage.__table__, "after_create", DDL(_statement).execute_if(dialect="sqlite"))
 event.listen(
-    KbChunk.__table__,
+    KbPassage.__table__,
     "before_drop",
-    DDL("DROP TABLE IF EXISTS kb_chunk_fts").execute_if(dialect="sqlite"),
+    DDL("DROP TABLE IF EXISTS kb_passage_fts").execute_if(dialect="sqlite"),
 )

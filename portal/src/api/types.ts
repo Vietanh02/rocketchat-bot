@@ -410,6 +410,7 @@ export interface MemoryStatus {
   notes: number;
   pending: number;
   semantic: boolean;
+  stages: Record<string, number>;
 }
 
 export interface MemoryNote {
@@ -453,6 +454,9 @@ export interface KnowledgeConfig {
   top_k: number;
   min_score: number;
   intent_mode: IntentMode;
+  llm_index: boolean;
+  llm_judge: boolean;
+  index_model: string;
 }
 
 export interface KbDocument {
@@ -469,6 +473,9 @@ export interface KbDocument {
   source: "portal" | "chat" | string;
   uploaded_by: string | null;
   created_at: string | null;
+  stage: "queued" | "indexing" | "indexed" | "basic" | "failed" | string;
+  stage_error: string | null;
+  sections: number;
   pending: number;
 }
 
@@ -491,6 +498,7 @@ export interface KbPassage {
 export interface KbSearchResult {
   intent: "lookup" | "command" | "chat" | string;
   intent_by: string;
+  judged: boolean;
   source: string | null;
   passages: KbPassage[];
 }
@@ -501,4 +509,5 @@ export interface KbStatus {
   passages: number;
   pending: number;
   semantic: boolean;
+  stages: Record<string, number>;
 }

@@ -25,6 +25,7 @@ os.environ.update(
     APP_RC_BOT_USERNAME="",
     APP_RC_BOT_PASSWORD="",
     APP_LOG_LEVEL="WARNING",
+    APP_KB_FILES_DIR=str(_TMP / "kb"),
 )
 
 import pytest  # noqa: E402

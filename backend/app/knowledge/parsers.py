@@ -1,10 +1,15 @@
-"""Text out of uploaded documents.
+"""Text out of uploaded documents, as written.
 
-PDF (pypdf, page by page so answers can cite a page), Word .docx
-(python-docx, headings kept as Markdown headings), and plain text formats:
-Markdown, text, CSV, JSON and HTML (tags stripped with the standard
-library). Scanned PDFs have no text layer and come out empty; that is
-reported rather than indexed as nothing.
+The text is what later passages are cut from, character for character, so
+nothing here rewrites it: line endings are made "\n" and NUL characters
+dropped, and that is all. Indentation, tabs and spacing stay as they are.
+
+PDF (pypdf, page by page so answers can cite a page); Word .docx in
+document order, paragraphs and tables where they stand, headings marked as
+Markdown headings and tables as Markdown tables; HTML with its tags
+removed (whitespace there is not meaningful, except in <pre>); and plain
+text formats as they are. Scanned PDFs have no text layer and come out
+empty; that is reported rather than indexed as nothing.
 
 Parsing is CPU work; callers run it in a thread (`asyncio.to_thread`).
 """
@@ -122,11 +127,10 @@ def _decode(data: bytes) -> str:
 
 
 def _tidy(text: str) -> str:
-    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
-    text = re.sub(r"[ \t ]+", " ", text)
-    text = re.sub(r" *\n *", "\n", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+    """Only what is not content: Windows/Mac line endings, NUL, form feeds."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "").replace("\f", "\n")
+    # Blank lines at the very start and end carry nothing.
+    return text.strip("\n").rstrip()
 
 
 def _pdf(data: bytes) -> list[Page]:
@@ -157,6 +161,8 @@ def _docx(data: bytes) -> str:
     try:
         import docx
         from docx.opc.exceptions import PackageNotFoundError
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
     except ImportError as exc:  # pragma: no cover - a dependency
         raise ParseError("Word files cannot be read on this server") from exc
     try:
@@ -164,58 +170,109 @@ def _docx(data: bytes) -> str:
     except (PackageNotFoundError, ValueError, KeyError, OSError) as exc:
         raise ParseError(f"the Word file could not be read ({exc})") from exc
 
-    lines: list[str] = []
-    for paragraph in document.paragraphs:
-        text = paragraph.text.strip()
-        if not text:
-            lines.append("")
-            continue
-        style = (paragraph.style.name if paragraph.style is not None else "") or ""
-        match = re.match(r"Heading (\d)", style)
-        if match:
-            lines.append(f"{'#' * int(match.group(1))} {text}")
-        elif style == "Title":
-            lines.append(f"# {text}")
-        else:
-            lines.append(text)
-    for table in document.tables:
-        lines.append("")
-        for row in table.rows:
-            cells = [cell.text.strip().replace("\n", " ") for cell in row.cells]
-            lines.append(" | ".join(cells))
-    return "\n".join(lines)
+    # Paragraphs and tables in the order they appear. Each paragraph is a
+    # block of its own; list items stay together, one per line.
+    blocks: list[str] = []
+    in_list = False
+    for element in document.element.body.iterchildren():
+        tag = element.tag.rsplit("}", 1)[-1]
+        if tag == "p":
+            paragraph = Paragraph(element, document)
+            text = paragraph.text
+            if not text.strip():
+                in_list = False
+                continue
+            style = (paragraph.style.name if paragraph.style is not None else "") or ""
+            match = re.match(r"Heading (\d)", style)
+            if match:
+                blocks.append(f"{'#' * int(match.group(1))} {text.strip()}")
+                in_list = False
+            elif style == "Title":
+                blocks.append(f"# {text.strip()}")
+                in_list = False
+            elif style.startswith("List"):
+                item = f"- {text}"
+                if in_list and blocks:
+                    blocks[-1] += "\n" + item
+                else:
+                    blocks.append(item)
+                in_list = True
+            else:
+                blocks.append(text)
+                in_list = False
+        elif tag == "tbl":
+            in_list = False
+            rows = []
+            for row in Table(element, document).rows:
+                cells = [cell.text.replace("\n", " ").replace("|", "\\|") for cell in row.cells]
+                rows.append("| " + " | ".join(cells) + " |")
+            if rows:
+                width = rows[0].count(" | ") + 1
+                rows.insert(1, "|" + "---|" * width)
+                blocks.append("\n".join(rows))
+    return "\n\n".join(blocks)
 
 
 class _TextOnly(HTMLParser):
-    SKIP = {"script", "style", "noscript", "head"}
-    BLOCK = {"p", "div", "br", "li", "tr", "section", "article", "table", "ul", "ol"}
+    """The text of an HTML page: blocks on their own, tables as Markdown rows."""
+
+    SKIP = {"script", "style", "noscript", "head", "template"}
+    BLOCK = {"p", "div", "section", "article", "table", "ul", "ol", "blockquote", "header", "footer", "main"}
 
     def __init__(self) -> None:
         super().__init__()
         self.parts: list[str] = []
         self._skipping = 0
+        self._pre = 0
+        self._cells: list[str] | None = None
 
     def handle_starttag(self, tag: str, attrs) -> None:  # noqa: ANN001
         if tag in self.SKIP:
             self._skipping += 1
         elif re.fullmatch(r"h[1-6]", tag):
             self.parts.append("\n\n" + "#" * int(tag[1]) + " ")
-        elif tag in self.BLOCK:
+        elif tag == "pre":
+            self._pre += 1
+            self.parts.append("\n\n")
+        elif tag == "tr":
+            self._cells = []
+        elif tag in ("td", "th") and self._cells is not None:
+            self._cells.append("")
+        elif tag == "li":
+            self.parts.append("\n- ")
+        elif tag == "br":
             self.parts.append("\n")
+        elif tag in self.BLOCK:
+            self.parts.append("\n\n")
 
     def handle_endtag(self, tag: str) -> None:
         if tag in self.SKIP and self._skipping:
             self._skipping -= 1
+        elif tag == "pre" and self._pre:
+            self._pre -= 1
+            self.parts.append("\n\n")
+        elif tag == "tr" and self._cells is not None:
+            cells = [" ".join(cell.split()).replace("|", "\\|") for cell in self._cells]
+            self.parts.append("\n| " + " | ".join(cells) + " |")
+            self._cells = None
         elif tag in self.BLOCK or re.fullmatch(r"h[1-6]", tag):
-            self.parts.append("\n")
+            self.parts.append("\n\n")
 
     def handle_data(self, data: str) -> None:
-        if not self._skipping:
-            self.parts.append(data)
+        if self._skipping:
+            return
+        if self._cells is not None and self._cells:
+            self._cells[-1] += data
+            return
+        # Outside <pre>, runs of whitespace in HTML are a single space.
+        self.parts.append(data if self._pre else re.sub(r"\s+", " ", data))
 
 
 def _html(text: str) -> str:
     parser = _TextOnly()
     parser.feed(text)
     parser.close()
-    return "".join(parser.parts)
+    out = "".join(parser.parts)
+    out = re.sub(r"[ \t]+\n", "\n", out)
+    out = re.sub(r"\n[ \t]+(?=\S)", "\n", out) if "<pre" not in text.lower() else out
+    return re.sub(r"\n{3,}", "\n\n", out)

@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     qdrant_collection_prefix: str = "rcbot_"
     qdrant_timeout_seconds: float = Field(default=10.0, gt=0)
 
+    # Uploaded knowledge base files are kept here, to be read again later.
+    kb_files_dir: str = "./data/kb"
+
     # Bot runtime
     bot_enabled: bool = True
     inbound_queue_size: int = 500

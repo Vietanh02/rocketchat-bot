@@ -184,6 +184,7 @@ class AgentRunner:
             self.memory.ensure_indexed(snapshot.embedding)
         if knowledge_on:
             self.kb.ensure_indexed(snapshot.embedding)
+            self.kb.ensure_pipeline()
 
         # A question to look up, a request to do something, or small talk?
         wording = turn.message.clean_text or turn.message.text
@@ -209,7 +210,9 @@ class AgentRunner:
                 ),
                 self._recall(question, scopes, snapshot) if memory_on else _nothing(),
                 self.profiles.get(turn.message.sender_id) if direct else _nothing(),
-                self._look_up(wording, intent, documents, snapshot) if knowledge_on else _no_lookup(),
+                self._look_up(wording, intent, documents, snapshot, chat)
+                if knowledge_on
+                else _no_lookup(),
             )
         timer.mark("session_loaded")
         passages = lookup.passages if lookup is not None else []
@@ -217,7 +220,8 @@ class AgentRunner:
             timer.labels["kb"] = lookup.source or "none"
         context = ""
         if passages:
-            context = passages_block([(p.label, p.text) for p in passages], lookup.source or "")
+            context = passages_block([(p.label, p.shown) for p in passages], lookup.source or "")
+            timer.labels["judged"] = "yes" if lookup.judged else "no"
         elif intent.kind == COMMAND:
             context = COMMAND_NOTE
         messages = build_messages(
@@ -322,9 +326,18 @@ class AgentRunner:
         return AgentResult(shown, status, error, state.id, chat.model, len(turns))
 
     async def _look_up(
-        self, question: str, intent: Intent, documents: str, snapshot: ConfigSnapshot
+        self,
+        question: str,
+        intent: Intent,
+        documents: str,
+        snapshot: ConfigSnapshot,
+        chat: LLMChat | None = None,
     ) -> tuple[Lookup | None, set[str]]:
         """Passages for a question to look up, and which documents the conversation can search."""
+        knowledge = snapshot.knowledge
+        judge_with = None
+        if knowledge.llm_judge and chat is not None:
+            judge_with = (chat, knowledge.index_model or snapshot.agent.fast_model or None)
         try:
             if intent.kind != LOOKUP:
                 return None, await self.kb.scopes_with_documents([documents, BASE_SCOPE])
@@ -336,6 +349,7 @@ class AgentRunner:
                 min_score=snapshot.knowledge.min_score,
                 # Sent with a document, or talking about one.
                 about_document=intent.by == "given" or about_a_document(question),
+                judge_with=judge_with,
             )
         except asyncio.CancelledError:
             raise

@@ -765,6 +765,9 @@ class KnowledgeConfigOut(BaseModel):
     top_k: int
     min_score: float
     intent_mode: Literal["rules", "model"]
+    llm_index: bool
+    llm_judge: bool
+    index_model: str
 
 
 class KnowledgeConfigUpdate(BaseModel):
@@ -773,6 +776,14 @@ class KnowledgeConfigUpdate(BaseModel):
     top_k: int | None = Field(default=None, ge=1, le=15)
     min_score: float | None = Field(default=None, ge=0, le=1)
     intent_mode: Literal["rules", "model"] | None = None
+    llm_index: bool | None = None
+    llm_judge: bool | None = None
+    index_model: str | None = Field(default=None, max_length=256)
+
+    @field_validator("index_model")
+    @classmethod
+    def _strip(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
 
 
 class KbDocumentOut(BaseModel):
@@ -789,6 +800,10 @@ class KbDocumentOut(BaseModel):
     source: str
     uploaded_by: str | None
     created_at: datetime | None
+    # queued|indexing|indexed|basic|failed: how far the language model got.
+    stage: str = "basic"
+    stage_error: str | None = None
+    sections: int = 0
     # Passages without a vector of the current model yet.
     pending: int = 0
 
@@ -812,6 +827,8 @@ class KbPassageOut(BaseModel):
 class KbSearchOut(BaseModel):
     intent: str
     intent_by: str
+    # Whether the language model chose the passages.
+    judged: bool = False
     # "conversation", "base" or null: where the passages came from.
     source: str | None
     passages: list[KbPassageOut]
@@ -823,3 +840,5 @@ class KbStatusOut(BaseModel):
     passages: int
     pending: int
     semantic: bool
+    # Documents per stage of the language model's indexing.
+    stages: dict[str, int] = Field(default_factory=dict)

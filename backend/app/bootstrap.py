@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 from alembic.config import Config
+from alembic.runtime.environment import EnvironmentContext
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import func, select
@@ -101,12 +102,37 @@ def _stamp_head(connection) -> None:
         log.info("Stamped the database at Alembic revision %s", head)
 
 
-async def create_schema() -> None:
-    """Create any missing tables so a fresh checkout runs with no extra step.
+def _upgrade_to_head(connection) -> None:
+    """Apply the migrations a database made by an older release is missing.
 
-    Alembic owns schema *changes* from here on; run `alembic upgrade head`
-    after pulling a release that adds a migration.
+    A brand-new database has no revision yet; `create_all` builds it and
+    `_stamp_head` records it as current instead.
     """
+    if MigrationContext.configure(connection).get_current_revision() is None:
+        return
+    config = _alembic_config()
+    script = ScriptDirectory.from_config(config)
+
+    def upgrade(revision, _context):
+        return script._upgrade_revs("head", revision)
+
+    with EnvironmentContext(config, script, fn=upgrade, destination_rev="head") as environment:
+        environment.configure(
+            connection=connection, target_metadata=Base.metadata, render_as_batch=True
+        )
+        with environment.begin_transaction():
+            environment.run_migrations()
+
+
+async def create_schema() -> None:
+    """Bring the database up to date, so a deploy needs no extra step.
+
+    An existing database gets the migrations it is missing (they are written
+    to skip what is already there); then any missing table is created, and a
+    new database is recorded at the latest revision.
+    """
+    async with engine.begin() as connection:
+        await connection.run_sync(_upgrade_to_head)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.run_sync(_stamp_head)

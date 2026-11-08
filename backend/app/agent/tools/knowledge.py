@@ -14,7 +14,7 @@ from app.bot.config_store import EmbeddingSettings
 from app.knowledge.base import BASE_SCOPE, KnowledgeBase
 
 SEARCH_LIMIT = 8
-PASSAGE_CHARS = 1200
+PASSAGE_CHARS = 1600
 
 
 class KnowledgeTools:
@@ -79,8 +79,10 @@ class KnowledgeTools:
             limit = max(1, min(SEARCH_LIMIT, int(arguments.get("limit") or 5)))
         except (TypeError, ValueError):
             limit = 5
-        passages = await self._kb.search(
-            query, scopes, embedding=self._embedding, limit=limit, min_score=self._min_score
+        passages = await self._kb.expand(
+            await self._kb.search(
+                query, scopes, embedding=self._embedding, limit=limit, min_score=self._min_score
+            )
         )
         return tool_result(
             {
@@ -88,7 +90,7 @@ class KnowledgeTools:
                     {
                         "label": passage.label,
                         "from": "conversation" if passage.scope != BASE_SCOPE else "knowledge_base",
-                        "text": passage.text[:PASSAGE_CHARS],
+                        "text": passage.shown[:PASSAGE_CHARS],
                     }
                     for passage in passages
                 ]

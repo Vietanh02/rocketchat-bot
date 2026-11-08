@@ -5,11 +5,19 @@ import type { KbDocument, KbSearchResult, KbUploadResult, KnowledgeConfig } from
 import { useAuth } from "../auth";
 import { Banner, Card, Checkbox, Empty, Field, Loading, Pill, Stat } from "../components/ui";
 import { formatDateTime } from "../format";
-import { errorMessage, useResource } from "../hooks";
+import { errorMessage, usePoll, useResource } from "../hooks";
 
 type Notice = { kind: "ok" | "error" | "warn"; text: string } | null;
 
 const ACCEPT = ".pdf,.docx,.md,.markdown,.txt,.csv,.tsv,.json,.html,.htm,.rst,.yaml,.yml,.log";
+
+const STAGE: Record<string, { label: string; kind?: "ok" | "warn" | "error"; hint: string }> = {
+  queued: { label: "waiting", hint: "Searchable by its words; the language model will index it shortly." },
+  indexing: { label: "indexing…", hint: "The language model is grouping it into sections and describing them." },
+  indexed: { label: "indexed", kind: "ok", hint: "Sections, keywords and likely questions written by the language model." },
+  basic: { label: "by headings", kind: "warn", hint: "Cut by its headings only: model indexing is off or no model is set up." },
+  failed: { label: "model failed", kind: "error", hint: "The language model could not index it; it is cut by its headings." },
+};
 
 const INTENT_LABEL: Record<string, string> = {
   lookup: "question to look up",
@@ -44,6 +52,21 @@ export default function KnowledgePage() {
     void base.reload();
     void chat.reload();
   };
+
+  // While documents are being indexed, keep their stage fresh.
+  const busy = (status.data?.stages.queued ?? 0) + (status.data?.stages.indexing ?? 0) > 0;
+  usePoll(() => {
+    if (busy) refresh();
+  }, 4000);
+
+  const reprocess = (document: KbDocument) =>
+    void api
+      .reprocessDocument(document.id)
+      .then(() => {
+        refresh();
+        setNotice({ kind: "ok", text: `${document.filename} will be indexed again.` });
+      })
+      .catch((caught) => setNotice({ kind: "error", text: errorMessage(caught) }));
 
   const remove = (document: KbDocument) =>
     window.confirm(`Delete “${document.filename}” and its ${document.chunks} passages?`) &&
@@ -105,6 +128,10 @@ export default function KnowledgePage() {
               <Stat label="Sent in chat" value={status.data.chat_documents} />
               <Stat label="Passages" value={status.data.passages} />
               <Stat label="Waiting for a vector" value={status.data.semantic ? status.data.pending : "—"} />
+              <Stat
+                label="Being indexed by the model"
+                value={(status.data.stages.queued ?? 0) + (status.data.stages.indexing ?? 0)}
+              />
             </div>
             <div>
               Search:{" "}
@@ -129,7 +156,13 @@ export default function KnowledgePage() {
       {isAdmin && <UploadCard onUploaded={refresh} />}
 
       <Card title="Documents">
-        <DocumentTable resource={base} isAdmin={isAdmin} onDelete={remove} empty="No documents yet. Upload some above." />
+        <DocumentTable
+          resource={base}
+          isAdmin={isAdmin}
+          onDelete={remove}
+          onReprocess={reprocess}
+          empty="No documents yet. Upload some above."
+        />
       </Card>
 
       <Card title="Sent in chat">
@@ -141,6 +174,7 @@ export default function KnowledgePage() {
           resource={chat}
           isAdmin={isAdmin}
           onDelete={remove}
+          onReprocess={reprocess}
           showConversation
           empty="Nobody has sent a document yet."
         />
@@ -216,6 +250,40 @@ function BehaviourCard({ isAdmin, onNotice }: { isAdmin: boolean; onNotice: (n: 
             <option value="rules">By the wording (instant)</option>
             <option value="model">By the wording, then the fast model when unclear (+ ~0.5 s)</option>
           </select>
+        </Field>
+
+        <Checkbox
+          label="Let the language model index documents"
+          checked={form.llm_index}
+          disabled={!isAdmin || !form.enabled}
+          onChange={(value) => set("llm_index", value)}
+        />
+        <p className="hint" style={{ marginTop: "-0.5rem" }}>
+          After upload, the model groups each document into sections and writes, for the search index
+          only, a title, a summary, keywords with their synonyms and the questions each section answers.
+          It never writes the text: passages are always exact slices of the document. A few model calls per
+          document, in the background.
+        </p>
+        <Checkbox
+          label="Let the language model pick the passages that answer"
+          checked={form.llm_judge}
+          disabled={!isAdmin || !form.enabled}
+          onChange={(value) => set("llm_judge", value)}
+        />
+        <p className="hint" style={{ marginTop: "-0.5rem" }}>
+          Before answering a question to look up, the model reads what search found and keeps only what
+          answers it, so unrelated passages are not used. One short call, about 1 – 2 s.
+        </p>
+        <Field
+          label="Model for indexing and picking"
+          hint="As the gateway names it. Empty: the Assistant page's fast model, else the main model."
+        >
+          <input
+            type="text"
+            value={form.index_model}
+            disabled={!isAdmin || !form.enabled}
+            onChange={(event) => set("index_model", event.target.value)}
+          />
         </Field>
 
         <div className="grid">
@@ -321,12 +389,14 @@ function DocumentTable({
   resource,
   isAdmin,
   onDelete,
+  onReprocess,
   showConversation = false,
   empty,
 }: {
   resource: { data: KbDocument[] | null; loading: boolean; error: string | null };
   isAdmin: boolean;
   onDelete: (document: KbDocument) => void;
+  onReprocess: (document: KbDocument) => void;
   showConversation?: boolean;
   empty: string;
 }) {
@@ -342,6 +412,7 @@ function DocumentTable({
             <th>Document</th>
             {showConversation && <th>Conversation</th>}
             <th>Size</th>
+            <th>Indexing</th>
             <th>Passages</th>
             <th>Added</th>
             {isAdmin && <th />}
@@ -362,8 +433,13 @@ function DocumentTable({
                 {size(document.size_bytes)}
                 {document.pages ? ` · ${document.pages} pages` : ""}
               </td>
+              <td title={document.stage_error ?? STAGE[document.stage]?.hint}>
+                <Pill kind={STAGE[document.stage]?.kind}>{STAGE[document.stage]?.label ?? document.stage}</Pill>
+                {document.stage_error && <div className="hint">{document.stage_error}</div>}
+              </td>
               <td>
                 {document.chunks}
+                {document.sections > 0 && <span className="hint"> in {document.sections} sections</span>}
                 {document.pending > 0 && <div className="hint">{document.pending} without a vector yet</div>}
               </td>
               <td className="muted">
@@ -376,9 +452,18 @@ function DocumentTable({
               </td>
               {isAdmin && (
                 <td>
-                  <button type="button" className="danger" onClick={() => onDelete(document)}>
-                    Delete
-                  </button>
+                  <div className="row">
+                    <button
+                      type="button"
+                      disabled={document.stage === "queued" || document.stage === "indexing"}
+                      onClick={() => onReprocess(document)}
+                    >
+                      Index again
+                    </button>
+                    <button type="button" className="danger" onClick={() => onDelete(document)}>
+                      Delete
+                    </button>
+                  </div>
                 </td>
               )}
             </tr>
@@ -435,6 +520,7 @@ function TryCard() {
               </Pill>{" "}
               <span className="hint">
                 ({result.intent_by === "model" ? "by the fast model" : result.intent_by === "default" ? "unclear wording, looked up" : "by the wording"})
+                {result.judged && " · passages picked by the language model"}
               </span>
             </div>
             {result.intent !== "lookup" ? (

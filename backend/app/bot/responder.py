@@ -79,8 +79,17 @@ class RuleResponder:
         # Configured in the portal; "llm" mode falls back to rules until it is.
         self.llm = llm
         self.agent = AgentRunner(session_factory)
+        # The document pipeline indexes with the configured model.
+        self.agent.kb.model_access = self._kb_model
         self._gateway_checked: dict[str, float] = {}
         self._background: set[asyncio.Task] = set()
+
+    async def _kb_model(self) -> tuple[ConfigSnapshot, LLMChat | None]:
+        """The settings, and the model to index documents with when one is set up."""
+        snapshot = await self._config_store.current()
+        if self.llm is None or not snapshot.llm.configured:
+            return snapshot, None
+        return snapshot, self.llm.chat_for(snapshot.llm)
 
     async def respond(self, message: MessageContext, *, live: bool = True) -> Reply | None:
         """`live=False` never posts while answering, as when the portal tests a command."""

@@ -50,17 +50,16 @@ services:
     expose:
       - "6333"
 
-  # Optional local embedding server, off by default; needs about 0.5 GB of RAM:
-  #   docker compose --profile local-embed up -d
-  # then in the portal: provider "tei", URL http://embed:80, prefixes
-  # "query: " and "passage: ". It is on the private network, so the backend
-  # needs APP_ALLOW_PRIVATE_INTEGRATION_HOSTS=true to call it.
+  # Embedding model for the vector database, on this machine: no API calls,
+  # nothing leaves the server. About 0.6 GB of RAM. In the portal (Memory):
+  # provider "text-embeddings-inference", URL http://embed:80, prefixes
+  # "query: " and "passage: " (e5 models are trained with them). The model is
+  # downloaded into the embed_models volume on first start.
   embed:
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8.3
-    profiles: ["local-embed"]
     restart: unless-stopped
-    mem_limit: 768m
-    command: ["--model-id", "intfloat/multilingual-e5-small", "--max-batch-tokens", "8192"]
+    mem_limit: 1g
+    command: ["--model-id", "intfloat/multilingual-e5-small", "--max-batch-tokens", "16384", "--max-client-batch-size", "64"]
     volumes:
       - embed_models:/data
     networks:

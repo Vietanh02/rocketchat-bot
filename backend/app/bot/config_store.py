@@ -244,6 +244,9 @@ class KnowledgeSettings:
     top_k: int = 5
     min_score: float = 0.3
     intent_mode: str = "rules"
+    llm_index: bool = True
+    llm_judge: bool = True
+    index_model: str = ""
 
     @classmethod
     def from_model(cls, model: KnowledgeConfig) -> KnowledgeSettings:
@@ -253,6 +256,9 @@ class KnowledgeSettings:
             top_k=model.top_k,
             min_score=model.min_score,
             intent_mode=model.intent_mode,
+            llm_index=model.llm_index,
+            llm_judge=model.llm_judge,
+            index_model=(model.index_model or "").strip(),
         )
 
 

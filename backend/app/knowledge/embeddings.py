@@ -209,6 +209,11 @@ class Embedder:
         timeout = min(self.settings.timeout_seconds, QUERY_TIMEOUT_SECONDS)
         return (await self._embed([self.settings.query_prefix + text], timeout))[0]
 
+    async def embed_queries(self, texts: Sequence[str]) -> list[Vector]:
+        """Several question-like texts at once (not on the way to an answer)."""
+        prefix = self.settings.query_prefix
+        return await self._embed([prefix + text for text in texts])
+
     async def embed_documents(self, texts: Sequence[str]) -> list[Vector]:
         prefix = self.settings.document_prefix
         return await self._embed([prefix + text for text in texts])

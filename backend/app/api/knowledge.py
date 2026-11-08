@@ -16,7 +16,7 @@ from app.bot.config_store import bump_config_version, ensure_knowledge_config
 from app.knowledge.base import BASE_SCOPE, DocumentError, DocumentInfo, KnowledgeBase, Passage
 from app.knowledge.parsers import MAX_FILE_BYTES, SUPPORTED, is_supported
 from app.knowledge.vectorstore import VectorStoreError
-from app.models import KbChunk, KbDocument, KnowledgeConfig
+from app.models import KbDocument, KbPassage, KnowledgeConfig
 from app.runtime import Runtime
 from app.schemas import (
     KbDocumentOut,
@@ -45,6 +45,9 @@ def _config_out(config: KnowledgeConfig) -> KnowledgeConfigOut:
         top_k=config.top_k,
         min_score=config.min_score,
         intent_mode=config.intent_mode,
+        llm_index=config.llm_index,
+        llm_judge=config.llm_judge,
+        index_model=config.index_model,
     )
 
 
@@ -63,6 +66,9 @@ def _document_out(info: DocumentInfo) -> KbDocumentOut:
         source=info.source,
         uploaded_by=info.uploaded_by,
         created_at=info.created_at,
+        stage=info.stage,
+        stage_error=info.stage_error,
+        sections=info.sections,
         pending=info.pending,
     )
 
@@ -73,7 +79,7 @@ def _passage_out(passage: Passage) -> KbPassageOut:
         document_id=passage.document_id,
         scope=passage.scope,
         label=passage.label,
-        text=passage.text,
+        text=passage.shown,
         score=None if passage.score is None else round(passage.score, 4),
     )
 
@@ -91,6 +97,7 @@ async def update_knowledge_config(
 ) -> KnowledgeConfigOut:
     config = await ensure_knowledge_config(session)
     changes = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+    turned_on = changes.get("llm_index") and not config.llm_index
     for field, value in changes.items():
         setattr(config, field, value)
     await bump_config_version(session)
@@ -100,6 +107,12 @@ async def update_knowledge_config(
     await session.commit()
     await session.refresh(config)
     await runtime.apply_config_change()
+    if turned_on:
+        # Documents cut by their headings only get the model's indexing now.
+        kb = _kb(runtime)
+        for info in await kb.documents():
+            if info.stage in ("basic", "failed"):
+                await kb.reprocess(info.id)
     return _config_out(config)
 
 
@@ -113,7 +126,7 @@ async def knowledge_status(_: CurrentUser, session: SessionDep, runtime: Runtime
     chat = await session.scalar(
         select(func.count()).select_from(KbDocument).where(KbDocument.scope != BASE_SCOPE)
     )
-    passages = await session.scalar(select(func.count()).select_from(KbChunk)) or 0
+    passages = await session.scalar(select(func.count()).select_from(KbPassage)) or 0
     semantic = snapshot.embedding.configured and kb.knowledge.store is not None
     if semantic:
         try:
@@ -126,6 +139,7 @@ async def knowledge_status(_: CurrentUser, session: SessionDep, runtime: Runtime
         passages=passages,
         pending=await kb.pending_count(snapshot.embedding) if snapshot.embedding.configured else passages,
         semantic=semantic,
+        stages=await kb.stage_counts(),
     )
 
 
@@ -227,6 +241,21 @@ async def delete_document(
     await session.commit()
 
 
+@router.post("/documents/{document_id}/reprocess", response_model=KbDocumentOut)
+async def reprocess_document(
+    document_id: int, admin: AdminUser, session: SessionDep, runtime: RuntimeDep
+) -> KbDocumentOut:
+    """Have the language model index the document again."""
+    kb = _kb(runtime)
+    if not await kb.reprocess(document_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such document")
+    record_audit(session, admin, "reprocess", "kb_document", document_id, "")
+    await session.commit()
+    snapshot = await runtime.config_store.current()
+    [info] = [d for d in await kb.documents(embedding=snapshot.embedding) if d.id == document_id]
+    return _document_out(info)
+
+
 @router.post("/reindex", response_model=KbStatusOut)
 async def reindex_knowledge(admin: AdminUser, session: SessionDep, runtime: RuntimeDep) -> KbStatusOut:
     snapshot = await runtime.config_store.current()
@@ -250,19 +279,25 @@ async def search_knowledge(
     agent = _agent(runtime)
     llm = getattr(runtime.bot.responder, "llm", None)
     chat = llm.chat_for(snapshot.llm) if llm is not None and snapshot.llm.configured else None
+    knowledge = snapshot.knowledge
     intent = await detect(
-        q, mode=snapshot.knowledge.intent_mode, chat=chat, fast_model=snapshot.agent.fast_model
+        q, mode=knowledge.intent_mode, chat=chat, fast_model=snapshot.agent.fast_model
     )
-    passages = await agent.kb.search(
+    judge_with = None
+    if knowledge.llm_judge and chat is not None:
+        judge_with = (chat, knowledge.index_model or snapshot.agent.fast_model or None)
+    lookup = await agent.kb.lookup(
         q,
-        [BASE_SCOPE],
+        "conv:portal-search",
         embedding=snapshot.embedding,
-        limit=snapshot.knowledge.top_k,
-        min_score=snapshot.knowledge.min_score,
+        limit=knowledge.top_k,
+        min_score=knowledge.min_score,
+        judge_with=judge_with,
     )
     return KbSearchOut(
         intent=intent.kind,
         intent_by=intent.by,
-        source="base" if passages else None,
-        passages=[_passage_out(p) for p in passages],
+        judged=lookup.judged,
+        source=lookup.source,
+        passages=[_passage_out(p) for p in lookup.passages],
     )

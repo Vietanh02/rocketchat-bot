@@ -200,6 +200,7 @@ export const api = {
     return request<KbUploadResult[]>("/api/knowledge/documents", { method: "POST", body: form });
   },
   deleteDocument: (id: number) => del(`/api/knowledge/documents/${id}`),
+  reprocessDocument: (id: number) => post<KbDocument>(`/api/knowledge/documents/${id}/reprocess`),
   reindexKnowledge: () => post<KbStatus>("/api/knowledge/reindex"),
   searchKnowledge: (q: string) =>
     get<KbSearchResult>(`/api/knowledge/search?q=${encodeURIComponent(q)}`),

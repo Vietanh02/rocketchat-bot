@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 
 import pytest
 from sqlalchemy import select, text
@@ -17,10 +18,11 @@ from app.bot.config_store import EmbeddingSettings, ensure_knowledge_config
 from app.bot.llm import LLMService
 from app.knowledge.base import BASE_SCOPE, DocumentError, KnowledgeBase, Passage, conversation_scope
 from app.knowledge.chunking import chunk_pages
+from app.knowledge.indexer import repair
 from app.knowledge.parsers import Page, ParseError, parse
 from app.knowledge.service import KnowledgeService
 from app.knowledge.vectorstore import MemoryVectorStore
-from app.models import BotConfig, KbChunk, KbDocument
+from app.models import BotConfig, KbDocument, KbPassage, KbSource
 from app.rocketchat.ddp import RcFile, parse_files, parse_message
 from app.bot.types import MessageContext
 from tests.test_agent import model, settle  # noqa: F401
@@ -151,15 +153,83 @@ def test_unreadable_files_are_explained():
 
 def test_passages_follow_sections_and_keep_the_end():
     pages = parse("handbook.md", (LEAVE_POLICY + "\n\n" + "Filler sentence here. " * 120).encode()).pages
-    chunks = chunk_pages(pages)
-    assert [c.heading for c in chunks][:2] == ["Annual leave", "Overtime"]
+    text, _, sections, spans = chunk_pages(pages)
+    titles = [sections[span.section].title for span in spans]
+    assert titles[:2] == ["Employee handbook › Annual leave", "Employee handbook › Overtime"]
     # The title has nothing under it of its own; it stays with the first section.
-    assert chunks[0].text.startswith("# Employee handbook\n\n## Annual leave")
-    assert all(len(c.text) <= 1600 for c in chunks)
-    assert chunks[-1].text.endswith("Filler sentence here.")
+    assert text[spans[0].start : spans[0].end].startswith("# Employee handbook\n\n## Annual leave")
+    assert text[spans[-1].start : spans[-1].end].endswith("Filler sentence here.")
     # Pages are remembered.
-    chunks = chunk_pages([Page("first page. " * 50, 1), Page("second page", 2)])
-    assert chunks[0].page == 1 and "second page" in chunks[-1].text
+    _, _, _, spans = chunk_pages([Page("first page. " * 50, 1), Page("second page", 2)])
+    assert spans[0].page == 1
+
+
+SAMPLES = {
+    "table.md": "# Lương\n\n| Mã | Phòng | Lương |\n|---|---|---|\n"
+    + "\n".join(f"| NV{i:03d} | Phòng {i % 7} | {i * 1_000_000:,} |" for i in range(80))
+    + "\n\n## Ghi chú\n\n```yaml\nserver:\n  port: 8080\n\n  hosts: [a]\n```\n\nĐoạn cuối.",
+    "long.txt": "Một câu rất dài về quy định. " * 200 + "\n\nĐoạn hai\tcó tab  và  hai dấu cách.",
+    "rows.tsv": "Mã\tTên\n" + "\n".join(f"A{i}\tBút bi loại {i}" for i in range(300)),
+}
+
+
+@pytest.mark.parametrize("name", sorted(SAMPLES))
+def test_every_passage_is_an_exact_slice_of_the_text(name):
+    document = parse(name, SAMPLES[name].encode())
+    text, blocks, _, spans = chunk_pages(document.pages, tabular=name.endswith(".tsv"))
+    assert text == SAMPLES[name].strip("\n")
+    for span in spans:
+        assert span.end - span.start <= 1400
+    # Together the passages hold every non-blank character, in order, once.
+    joined = "".join(text[s.start : s.end] for s in spans)
+    assert "".join(joined.split()) == "".join(text.split())
+
+
+def test_table_rows_are_never_cut_and_carry_their_header():
+    text, _, _, spans = chunk_pages(parse("table.md", SAMPLES["table.md"].encode()).pages)
+    for i in range(80):
+        holders = [s for s in spans if f"| NV{i:03d} |" in text[s.start : s.end]]
+        assert len(holders) == 1
+        line = next(l for l in text[holders[0].start : holders[0].end].split("\n") if l.startswith(f"| NV{i:03d} |"))
+        assert line == f"| NV{i:03d} | Phòng {i % 7} | {i * 1_000_000:,} |"
+    continued = [s for s in spans if text[s.start : s.end].startswith("| NV")]
+    assert continued and all(s.context == "| Mã | Phòng | Lương |\n|---|---|---|" for s in continued)
+    code = next(s for s in spans if "```yaml" in text[s.start : s.end])
+    assert "  port: 8080\n\n  hosts: [a]" in text[code.start : code.end]
+
+
+def test_word_tables_stay_where_they_are():
+    import docx
+
+    document = docx.Document()
+    document.add_heading("Mục A", 1)
+    document.add_paragraph("Bảng phí mục A:")
+    table = document.add_table(rows=2, cols=2)
+    for row, cells in zip(table.rows, [("Loại", "Phí"), ("Phí A", "100.000đ")]):
+        row.cells[0].text, row.cells[1].text = cells
+    document.add_heading("Mục B", 1)
+    document.add_paragraph("Nội dung mục B.")
+    buffer = io.BytesIO()
+    document.save(buffer)
+    text, _, sections, spans = chunk_pages(parse("phi.docx", buffer.getvalue()).pages)
+    assert text.index("| Phí A | 100.000đ |") < text.index("# Mục B")
+    holder = next(s for s in spans if "100.000đ" in text[s.start : s.end])
+    assert sections[holder.section].title == "Mục A"
+
+
+def test_the_models_sections_are_repaired():
+    raw = [
+        {"first": 5, "last": 9, "title": "B", "keywords": ["x", "x", "y"]},
+        {"first": 1, "last": 3, "title": "A"},
+        {"first": 2, "last": 2, "title": "inside A"},
+        {"first": 8, "last": 40, "title": "C"},
+        {"first": "?", "last": 2},
+        "junk",
+    ]
+    sections = repair(raw, 0, 11)
+    assert [(s.first, s.last, s.title) for s in sections] == [(0, 3, "A"), (4, 8, "B"), (9, 11, "C")]
+    assert sections[1].keywords == ["x", "y"]
+    assert repair("nope", 0, 3) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -223,7 +293,7 @@ async def test_documents_are_searched_by_their_words(app_env):
     info = await add_base(app_env)
     assert info.chunks == 2 and info.pages is None
     found = await kb.search("how many days of annual leave?", [BASE_SCOPE], embedding=NO_VECTORS)
-    assert found[0].heading == "Annual leave" and found[0].label == "handbook — Annual leave"
+    assert found[0].label == "handbook — Employee handbook › Annual leave"
     # Question words alone match nothing in particular.
     assert await kb.search("what is it?", [BASE_SCOPE], embedding=NO_VECTORS) == []
 
@@ -243,8 +313,9 @@ async def test_deleting_a_document_removes_its_passages(app_env):
     info = await add_base(app_env)
     assert await kb.delete(info.id) is not None
     async with app_env.session_factory() as db:
-        assert (await db.scalars(select(KbChunk))).all() == []
-        fts = (await db.execute(text("SELECT count(*) FROM kb_chunk_fts WHERE kb_chunk_fts MATCH 'leave'"))).scalar()
+        assert (await db.scalars(select(KbPassage))).all() == []
+        assert (await db.scalars(select(KbSource))).all() == []
+        fts = (await db.execute(text("SELECT count(*) FROM kb_passage_fts WHERE kb_passage_fts MATCH 'leave'"))).scalar()
     assert fts == 0
     assert await kb.search("annual leave", [BASE_SCOPE], embedding=NO_VECTORS) == []
 
@@ -259,7 +330,7 @@ async def test_a_conversation_reads_its_own_documents_first(app_env):
     assert lookup.available == {mine, BASE_SCOPE}
     # Nothing about overtime in the conversation's document: the base answers.
     lookup = await kb.lookup("overtime pay", mine, embedding=NO_VECTORS, limit=3, min_score=0.3)
-    assert lookup.source == "base" and lookup.passages[0].heading == "Overtime"
+    assert lookup.source == "base" and lookup.passages[0].section.endswith("Overtime")
     # Other conversations never see it.
     lookup = await kb.lookup("contractor", "conv:dm:R2", embedding=NO_VECTORS, limit=3, min_score=0.3)
     assert lookup.passages == []
@@ -289,7 +360,7 @@ async def test_passages_get_vectors_and_are_found_by_meaning(app_env):
     await kb.add(BASE_SCOPE, "pets.md", b"# Pets\n\nA kitten may come to the office on Fridays.", embedding=embedding)
     await kb.add(BASE_SCOPE, "drinks.md", b"# Drinks\n\nThe kitchen serves espresso all day.", embedding=embedding)
     await kb._index_task
-    assert await store.count("kb_chunks") == 2 and await kb.pending_count(embedding) == 0
+    assert await store.count("kb_passages") == 2 and await kb.pending_count(embedding) == 0
     found = await kb.search("bring my cats", [BASE_SCOPE], embedding=embedding, limit=1)
     assert found[0].title == "pets"
 
@@ -316,10 +387,10 @@ async def test_a_question_is_answered_from_the_knowledge_base(app_env, gateway, 
     await app_env.bot._handle(incoming("How many days of annual leave do I get?"))
     reply = gateway.sent[-1]
     sent = question_sent(model)
-    assert "[Passages from the knowledge base." in sent and "[1] handbook — Annual leave" in sent
+    assert "[Passages from the knowledge base" in sent and "[1] handbook — Employee handbook › Annual leave" in sent
     assert sent.endswith("How many days of annual leave do I get?")
     assert "kb_search" in [t["function"]["name"] for t in model.requests[0]["tools"]]
-    assert "Sources: [1] handbook — Annual leave" in reply.text
+    assert "Sources: [1] handbook — Employee handbook › Annual leave" in reply.text
     # The transcript keeps the model's own words.
     state = await app_env.bot.responder.agent.sessions.open("dm:R1", "dm", context("x"))
     assert state.messages[-1]["content"] == "Twelve days per year [1]."
@@ -356,7 +427,7 @@ async def test_the_model_can_search_further(app_env, gateway, model):
     model.answers = [tool_use("kb_search", query="overtime holidays"), "200 percent [1]."]
     await app_env.bot.responder.respond(context("tạo giúp tôi bảng lương ngày lễ"))
     result = json.loads(model.requests[1]["messages"][-1]["content"])
-    assert result["passages"][0]["label"] == "handbook — Overtime"
+    assert result["passages"][0]["label"] == "handbook — Employee handbook › Overtime"
     assert result["passages"][0]["from"] == "knowledge_base"
 
 
@@ -477,7 +548,7 @@ async def test_uploading_to_the_knowledge_base(admin_client, app_env):
     assert status["documents"] == 2 and status["semantic"] is False
 
     found = (await admin_client.get("/api/knowledge/search", params={"q": "overtime pay?"})).json()
-    assert found["intent"] == LOOKUP and found["passages"][0]["label"] == "handbook — Overtime"
+    assert found["intent"] == LOOKUP and found["passages"][0]["label"] == "handbook — Employee handbook › Overtime"
 
     doc_id = documents[0]["id"]
     assert (await admin_client.delete(f"/api/knowledge/documents/{doc_id}")).status_code == 204
@@ -487,7 +558,8 @@ async def test_uploading_to_the_knowledge_base(admin_client, app_env):
 async def test_knowledge_settings(admin_client):
     response = await admin_client.put("/api/knowledge/config", json={"top_k": 3, "intent_mode": "model"})
     assert response.json() == {
-        "enabled": True, "chat_uploads": True, "top_k": 3, "min_score": 0.3, "intent_mode": "model"
+        "enabled": True, "chat_uploads": True, "top_k": 3, "min_score": 0.3, "intent_mode": "model",
+        "llm_index": True, "llm_judge": True, "index_model": "",
     }
     assert (await admin_client.put("/api/knowledge/config", json={"top_k": 99})).status_code == 422
 
@@ -514,3 +586,169 @@ async def test_asking_about_the_document_gets_its_beginning(app_env, gateway, mo
     sent = question_sent(model)
     assert "documents sent in this conversation" in sent and "Doanh thu quý ba" in sent
     assert "Annual leave" not in sent
+
+
+
+# --------------------------------------------------------------------------- #
+# The language model indexing documents and choosing passages
+# --------------------------------------------------------------------------- #
+
+HANDBOOK = """# Sổ tay nhân viên
+
+## Giờ làm việc
+
+Giờ làm việc từ 8 giờ đến 17 giờ, từ thứ Hai đến thứ Sáu.
+
+## Làm thêm giờ
+
+Làm thêm giờ ngày thường được trả 150% lương giờ.
+
+Làm thêm vào ngày lễ được trả 300% lương giờ.
+"""
+
+
+def sections_answer(body: dict) -> str:
+    """What a model indexing HANDBOOK would answer (blocks: 1 title, 2–3, 4–6)."""
+    return json.dumps(
+        {
+            "sections": [
+                {"first": 1, "last": 3, "title": "Giờ làm việc", "summary": "Giờ làm việc trong tuần.",
+                 "keywords": ["giờ hành chính", "office hours"], "questions": ["Mấy giờ thì vào làm?"]},
+                {"first": 4, "last": 6, "title": "Làm thêm giờ", "summary": "Tiền làm thêm giờ.",
+                 "keywords": ["tăng ca", "OT", "lương ngoài giờ"],
+                 "questions": ["Tăng ca được trả bao nhiêu?", "OT ngày lễ tính thế nào?"],
+                 # Whatever the model writes, the passage text stays the document's.
+                 "text": "Làm thêm giờ được trả 999%"},
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+
+async def wait_for_pipeline(app_env) -> None:
+    kb = kb_of(app_env)
+    for _ in range(5):
+        if kb._pipeline_task is not None:
+            await kb._pipeline_task
+        if kb._index_task is not None:
+            await kb._index_task
+
+
+async def test_the_model_indexes_a_document_without_touching_its_text(app_env, gateway, model):
+    model.on_index = sections_answer
+    info = await add_base(app_env, "so-tay.md", HANDBOOK)
+    await wait_for_pipeline(app_env)
+    async with app_env.session_factory() as db:
+        source = await db.get(KbSource, info.id)
+        passages = (await db.scalars(select(KbPassage).order_by(KbPassage.ord))).all()
+    assert source.stage == "indexed" and source.fallback_windows == 0
+    assert [p.section for p in passages] == ["Giờ làm việc", "Làm thêm giờ"]
+    assert "tăng ca" in passages[1].keywords and "Tăng ca được trả bao nhiêu?" in passages[1].questions
+    for passage in passages:
+        assert passage.text == source.text[passage.start : passage.end]
+    assert "999%" not in "".join(p.text for p in passages)
+    # The model was shown the numbered blocks, never asked to write them.
+    shown = model.side_requests[0]["messages"][1]["content"]
+    assert "[5] (paragraph)\nLàm thêm giờ ngày thường" in shown
+
+    # Its keywords let other words find the section.
+    found = await kb_of(app_env).search("lương ngoài giờ", [BASE_SCOPE], embedding=NO_VECTORS, limit=1)
+    assert found[0].section == "Làm thêm giờ"
+    [document] = await kb_of(app_env).documents()
+    assert (document.stage, document.sections) == ("indexed", 2)
+
+
+async def test_a_model_that_cannot_index_leaves_the_heading_cut(app_env, gateway, model):
+    model.on_index = lambda body: "Sorry, I cannot."
+    info = await add_base(app_env, "so-tay.md", HANDBOOK)
+    await wait_for_pipeline(app_env)
+    [document] = await kb_of(app_env).documents()
+    assert document.stage == "failed" and "no usable sections" in document.stage_error
+    found = await kb_of(app_env).search("làm thêm ngày lễ", [BASE_SCOPE], embedding=NO_VECTORS)
+    assert found and found[0].document_id == info.id
+
+
+async def test_indexing_can_be_turned_off(app_env, gateway, model):
+    await set_knowledge(app_env, llm_index=False)
+    await add_base(app_env, "so-tay.md", HANDBOOK)
+    await wait_for_pipeline(app_env)
+    assert model.side_requests == []
+    [document] = await kb_of(app_env).documents()
+    assert document.stage == "basic"
+
+
+async def test_the_model_chooses_the_passages_that_answer(app_env, gateway, model):
+    await add_base(app_env)
+    await add_base(app_env, "so-tay.md", HANDBOOK)
+    await wait_for_pipeline(app_env)
+
+    def pick_overtime(body):
+        listing = body["messages"][1]["content"]
+        numbers = re.findall(r"^\[(\d+)\] (.+)$", listing, flags=re.M)
+        return json.dumps({"passages": [int(n) for n, label in numbers if "Làm thêm" in label]})
+
+    model.on_judge = pick_overtime
+    model.answers = ["300% [1]."]
+    await app_env.bot.responder.respond(context("Làm thêm giờ ngày lễ được trả bao nhiêu?"))
+    sent = question_sent(model)
+    assert "300% lương giờ" in sent and "Annual leave" not in sent
+    # The passage comes with its neighbour in the same section, quoted exactly.
+    assert "Làm thêm giờ ngày thường được trả 150% lương giờ.\n\nLàm thêm vào ngày lễ" in sent
+
+
+async def test_when_the_model_finds_nothing_in_the_chats_documents_the_base_answers(app_env, gateway, model):
+    await add_base(app_env)
+    await app_env.bot.responder.respond(with_file("", "notes.txt", b"Annual party is in December.", gateway))
+    model.on_judge = lambda body: (
+        '{"passages": []}' if "notes" in body["messages"][1]["content"] else '{"passages": [1]}'
+    )
+    await app_env.bot.responder.respond(context("how many days of annual leave?"))
+    sent = question_sent(model)
+    assert "[Passages from the knowledge base" in sent and "twelve days" in sent
+
+
+async def test_questions_get_vectors_of_their_own(app_env, gateway, model):
+    import httpx
+
+    server = FakeEmbeddings()
+    store = MemoryVectorStore()
+    agent = app_env.bot.responder.agent
+    agent.knowledge = KnowledgeService(
+        app_env.session_factory, http_client=httpx.AsyncClient(transport=httpx.MockTransport(server)), store=store
+    )
+    agent.kb.knowledge = agent.knowledge
+    await set_embedding(app_env, provider="tei", base_url="http://tei.invalid", query_prefix="query: ", document_prefix="passage: ")
+    model.on_index = lambda body: json.dumps(
+        {"sections": [{"first": 1, "last": 2, "title": "Pets", "questions": ["Can I bring my cat?", "Is a kitten allowed?"]}]}
+    )
+    await add_base(app_env, "rules.md", "# Office rules\n\nAnimals must stay outside the building.")
+    await wait_for_pipeline(app_env)
+    assert await store.count("kb_passages") == 3  # the passage and its two questions
+    embedded = server.embedded
+    assert "query: Can I bring my cat?" in embedded
+    assert any(t.startswith("passage: rules — Pets\n# Office rules") for t in embedded)
+    embedding = (await app_env.config_store.current()).embedding
+    found = await agent.kb.search("kitten", [BASE_SCOPE], embedding=embedding, limit=1)
+    assert found[0].section == "Pets"
+
+
+async def test_the_uploaded_file_is_kept_and_removed_with_its_document(app_env):
+    info = await add_base(app_env)
+    async with app_env.session_factory() as db:
+        source = await db.get(KbSource, info.id)
+    from pathlib import Path
+
+    path = Path(source.file_path)
+    assert path.read_bytes() == LEAVE_POLICY.encode()
+    await kb_of(app_env).delete(info.id)
+    assert not path.exists()
+
+
+async def test_a_document_can_be_indexed_again(admin_client, app_env):
+    await add_base(app_env)
+    await wait_for_pipeline(app_env)
+    [document] = (await admin_client.get("/api/knowledge/documents")).json()
+    response = await admin_client.post(f"/api/knowledge/documents/{document['id']}/reprocess")
+    assert response.status_code == 200 and response.json()["stage"] in ("queued", "basic")
+    status = (await admin_client.get("/api/knowledge/status")).json()
+    assert set(status["stages"]) <= {"queued", "indexing", "basic"}

@@ -31,6 +31,10 @@ class Runtime:
     async def start(self) -> None:
         await self.scheduler.start()
         await self.bot.start()
+        # Documents left half-indexed by a restart carry on.
+        agent = getattr(self.bot.responder, "agent", None)
+        if agent is not None:
+            agent.kb.ensure_pipeline()
 
     async def stop(self) -> None:
         await self.bot.stop()
