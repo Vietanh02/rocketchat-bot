@@ -34,6 +34,8 @@ class Gateway(Protocol):
 
     async def update_message(self, room_id: str, message_id: str, text: str) -> None: ...
 
+    async def react(self, message_id: str, emoji: str, *, on: bool = True) -> None: ...
+
     async def resolve_dm_room(self, username: str) -> str: ...
 
     async def resolve_channel_room(self, name: str) -> str: ...
@@ -57,6 +59,9 @@ class LiveGateway:
 
     async def update_message(self, room_id: str, message_id: str, text: str) -> None:
         await self.rest.update_message(room_id, message_id, text)
+
+    async def react(self, message_id: str, emoji: str, *, on: bool = True) -> None:
+        await self.rest.react(message_id, emoji, should_react=on)
 
     async def resolve_dm_room(self, username: str) -> str:
         cached = self._dm_cache.get(username)
@@ -84,6 +89,8 @@ class FakeGateway:
         # Every edit, in order, as (message_id, text).
         self.updates: list[tuple[str, str]] = []
         self.fail_updates: Exception | None = None
+        # Reactions currently on, as (message_id, emoji).
+        self.reactions: list[tuple[str, str]] = []
 
     async def send_message(
         self, room_id: str, text: str, *, thread_id: str | None = None
@@ -106,6 +113,12 @@ class FakeGateway:
                 self.updates.append((message_id, text))
                 return
         raise RocketChatError(f"no message {message_id!r}")
+
+    async def react(self, message_id: str, emoji: str, *, on: bool = True) -> None:
+        if on:
+            self.reactions.append((message_id, emoji))
+        elif (message_id, emoji) in self.reactions:
+            self.reactions.remove((message_id, emoji))
 
     async def resolve_dm_room(self, username: str) -> str:
         return self.dm_rooms.setdefault(username, f"dm-{username}")

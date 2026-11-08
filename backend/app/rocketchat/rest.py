@@ -115,6 +115,14 @@ class RocketChatRest:
             json={"roomId": room_id, "msgId": message_id, "text": text},
         )
 
+    async def react(self, message_id: str, emoji: str, *, should_react: bool = True) -> None:
+        """Add (or with `should_react=False`, remove) the bot's reaction to a message."""
+        await self._request(
+            "POST",
+            "/chat.react",
+            json={"messageId": message_id, "emoji": emoji, "shouldReact": should_react},
+        )
+
     # ----------------------------------------------------------------- #
     # Rooms & users
     # ----------------------------------------------------------------- #

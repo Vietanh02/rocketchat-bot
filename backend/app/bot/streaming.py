@@ -11,6 +11,9 @@ stream would hold up everyone else's answers.
 
 `LiveReply` is the other kind of stream: text that is still being produced,
 such as a script's output, shown as it arrives rather than replayed afterwards.
+
+A reply longer than one Rocket.Chat message allows is posted as several
+(`app.bot.splitting`); only the first of them is streamed.
 """
 
 from __future__ import annotations
@@ -19,10 +22,12 @@ import asyncio
 import contextlib
 import logging
 import math
+import time
 import unicodedata
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from app.bot.splitting import MAX_MESSAGE_CHARS, first_cut, split_message
 from app.models import ReplyMode
 from app.rocketchat.gateway import Gateway, SentMessage
 from app.rocketchat.rest import RocketChatError
@@ -123,13 +128,37 @@ async def deliver(
     options: DeliveryOptions | None = None,
     sleep: Sleep = asyncio.sleep,
 ) -> SentMessage:
-    """Send `text` to a room, whole or streamed according to `options`."""
+    """Send `text` to a room, whole or streamed according to `options`.
+
+    Text too long for one message goes out as several; the last is returned.
+    """
     options = options or DeliveryOptions()
+    first, *more = split_message(text)
+    sent = await _deliver_one(
+        gateway, room_id, first, thread_id=thread_id, options=options, sleep=sleep
+    )
+    for part in more:
+        sent = await gateway.send_message(room_id, part, thread_id=thread_id)
+    return sent
+
+
+async def _deliver_one(
+    gateway: Gateway,
+    room_id: str,
+    text: str,
+    *,
+    thread_id: str | None,
+    options: DeliveryOptions,
+    sleep: Sleep,
+) -> SentMessage:
     if not options.streaming:
         return await gateway.send_message(room_id, text, thread_id=thread_id)
 
     interval = options.interval_ms / 1000
-    steps = stream_steps(text, options.chunk_chars, 1 + _max_edits(interval))
+    max_steps = 1 + _max_edits(interval)
+    steps = stream_steps(text, options.chunk_chars, max_steps)
+    # Cuts between words can add a step or two; the last edit makes up for them.
+    steps = steps[: max_steps - 1] + [text] if len(steps) > max_steps else steps
     if len(steps) == 1:
         return await gateway.send_message(room_id, text, thread_id=thread_id)
 
@@ -186,6 +215,17 @@ class LiveReply:
     the message catches up within `MAX_STREAM_EDITS` edits. `finish` types out
     whatever is left of the final text within the usual streaming limits, or
     streams it from scratch if nothing was posted yet.
+
+    With `follow`, as for a model's answer, the text already sets the pace:
+    each edit shows everything pushed so far, and `finish` shows the rest in
+    one edit instead of typing it out.
+
+    `push` also takes a function returning the text, called only when an edit
+    is about to be made, so costly formatting runs once per edit rather than
+    once per token.
+
+    Once the text outgrows one message, that message is completed and the rest
+    continues in a new one, so a long answer becomes several messages.
     """
 
     def __init__(
@@ -196,14 +236,24 @@ class LiveReply:
         thread_id: str | None = None,
         options: DeliveryOptions | None = None,
         sleep: Sleep = asyncio.sleep,
+        max_chars: int = MAX_MESSAGE_CHARS,
+        follow: bool = False,
     ) -> None:
         self._options = options or DeliveryOptions(mode=ReplyMode.stream.value)
+        self._follow = follow
+        # What `push` was last given, until it is turned into `_latest`.
+        self._source: str | Callable[[], str] | None = None
         self._gateway = gateway
         self._room_id = room_id
         self._thread_id = thread_id
         self._sleep = sleep
+        self._max_chars = max_chars
         self._interval = max(self._options.interval_ms / 1000, LIVE_MIN_INTERVAL_SECONDS)
         self._latest = ""
+        # The text is shown from here on; what comes before is in earlier messages.
+        self._offset = 0
+        # Put in front of the current message's text (a code fence reopened).
+        self._reopen = ""
         self._shown = ""
         self._message_id: str | None = None
         self._shown_at = -math.inf
@@ -211,16 +261,35 @@ class LiveReply:
         self._failed = False
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
+        # Messages completed because the text outgrew them.
+        self.completed: list[SentMessage] = []
+        # time.monotonic() when the first message went up.
+        self.first_posted_at: float | None = None
 
     @property
     def output(self) -> str:
         """Everything pushed so far, whether or not it has been typed out yet."""
+        return self._current()
+
+    def _current(self) -> str:
+        if self._source is not None:
+            source, self._source = self._source, None
+            self._latest = source() if callable(source) else source
         return self._latest
 
-    def push(self, text: str) -> None:
-        if self._closed or self._failed or not text.strip():
+    @property
+    def started(self) -> bool:
+        """Whether anything is on screen yet."""
+        return self._message_id is not None or bool(self.completed)
+
+    def _segment(self, text: str) -> str:
+        """The part of `text` that belongs in the current message."""
+        return self._reopen + text[self._offset :]
+
+    def push(self, text: str | Callable[[], str]) -> None:
+        if self._closed or self._failed or (isinstance(text, str) and not text.strip()):
             return
-        self._latest = text
+        self._source = text
         self._wake.set()
         if self._task is None:
             self._task = asyncio.create_task(self._type_along(), name="live-reply")
@@ -230,22 +299,43 @@ class LiveReply:
         loop = asyncio.get_running_loop()
         while not self._closed:
             wait = self._shown_at + self._interval - loop.time()
-            if self._latest == self._shown or wait > 0:
-                # A push or `finish` wakes this early; nothing waits out the interval.
+            if wait > 0:
+                # Too soon to edit again; `finish` wakes this early.
                 self._wake.clear()
                 with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(
-                        self._wake.wait(), None if self._latest == self._shown else wait
-                    )
+                    await asyncio.wait_for(self._wake.wait(), wait)
                 continue
-            if not await self._show(self._next_step(), partial=True):
+            # Only now is the pushed text produced (and formatted).
+            latest = self._segment(self._current())
+            if latest == self._shown:
+                self._wake.clear()
+                await self._wake.wait()
+                continue
+            cut = first_cut(latest, self._max_chars)
+            if cut is not None:
+                if not await self._roll_over(cut):
+                    return
+                continue
+            if not await self._show(self._next_step(latest), partial=True):
                 return
 
-    def _next_step(self) -> str:
+    async def _roll_over(self, cut) -> bool:
+        """Complete the current message with `cut.head`; the rest goes in a new one."""
+        if not await self._show(cut.head, partial=False):
+            return False
+        self.completed.append(
+            SentMessage(self._room_id, cut.head, self._thread_id, self._message_id)
+        )
+        self._offset += max(0, cut.consumed - len(self._reopen))
+        self._reopen = cut.reopen
+        self._message_id, self._shown = None, ""
+        return True
+
+    def _next_step(self, latest: str) -> str:
         """The shown text plus the next chunk of what has been pushed."""
-        if not self._latest.startswith(self._shown):
-            return self._latest
-        rest = self._latest[len(self._shown) :]
+        if self._follow or not latest.startswith(self._shown):
+            return latest
+        rest = latest[len(self._shown) :]
         return self._shown + stream_steps(rest, self._options.chunk_chars, MAX_STREAM_EDITS)[0]
 
     async def _show(self, text: str, *, partial: bool) -> bool:
@@ -257,6 +347,8 @@ class LiveReply:
                     self._room_id, shown, thread_id=self._thread_id
                 )
                 self._message_id = sent.message_id
+                if self.first_posted_at is None:
+                    self.first_posted_at = time.monotonic()
             else:
                 await self._gateway.update_message(self._room_id, self._message_id, shown)
         except RocketChatError as exc:
@@ -276,6 +368,19 @@ class LiveReply:
         self._wake.set()
         if self._task is not None:
             await self._task
+        if self._failed and self.completed:
+            # Part of the reply is already posted; send only what is missing.
+            text = text[self._offset :]
+            self._reopen = ""
+            self._offset = 0
+        first, *more = split_message(self._segment(text), self._max_chars)
+        sent = await self._finish_message(first)
+        for part in more:
+            sent = await self._gateway.send_message(self._room_id, part, thread_id=self._thread_id)
+        return sent
+
+    async def _finish_message(self, text: str) -> SentMessage:
+        """Complete the current message with `text`, which fits in one."""
         if self._message_id is None:
             return await deliver(
                 self._gateway,
@@ -291,6 +396,11 @@ class LiveReply:
             )
 
         shown = self._shown
+        if self._follow:
+            # The model already set the pace; show the rest at once.
+            return await _finish(
+                self._gateway, self._room_id, self._message_id, text, self._thread_id
+            )
         max_edits = _max_edits(self._interval)
         steps = stream_steps(text[len(shown) :], self._options.chunk_chars, max_edits)
         loop = asyncio.get_running_loop()
