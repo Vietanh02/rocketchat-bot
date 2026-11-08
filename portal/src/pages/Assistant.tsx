@@ -101,6 +101,7 @@ export default function AssistantPage() {
                   <tr>
                     <th>When</th>
                     <th>Status</th>
+                    <th>Kind</th>
                     <th>Reaction</th>
                     <th>First words</th>
                     <th>Total</th>
@@ -114,6 +115,10 @@ export default function AssistantPage() {
                       <td>{formatDateTime(run.started_at)}</td>
                       <td>
                         <StatusPill status={run.status} />
+                      </td>
+                      <td className="muted">
+                        {run.intent ?? "—"}
+                        {run.kb && run.kb !== "none" && ` · ${run.kb === "base" ? "knowledge base" : "chat document"}`}
                       </td>
                       <td>{ms(run.ack_ms)}</td>
                       <td>{ms(run.ttft_ms)}</td>

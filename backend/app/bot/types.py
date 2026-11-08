@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
-from app.rocketchat.ddp import IncomingMessage
+from app.rocketchat.ddp import IncomingMessage, RcFile
 
 if TYPE_CHECKING:
     from app.agent.timing import TurnTimer
@@ -32,6 +32,7 @@ class MessageContext:
     mentioned_bot: bool = False
     # time.monotonic() when the bot received it.
     arrived: float = field(default_factory=time.monotonic)
+    files: tuple[RcFile, ...] = ()
 
     @property
     def is_direct(self) -> bool:
@@ -54,6 +55,7 @@ class MessageContext:
             clean_text=clean,
             mentioned_bot=mentioned,
             arrived=message.arrived,
+            files=message.files,
         )
 
     def template_vars(self) -> dict[str, Any]:

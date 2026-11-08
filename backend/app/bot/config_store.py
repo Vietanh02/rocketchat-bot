@@ -25,6 +25,7 @@ from app.models import (
     AgentConfig,
     BotAccessEntry,
     EmbeddingConfig,
+    KnowledgeConfig,
     MemoryConfig,
     BotConfig,
     Command,
@@ -41,6 +42,7 @@ LLM_CONFIG_ID = 1
 AGENT_CONFIG_ID = 1
 EMBEDDING_CONFIG_ID = 1
 MEMORY_CONFIG_ID = 1
+KNOWLEDGE_CONFIG_ID = 1
 # How long a snapshot is used before its version is compared with the database.
 VERSION_CHECK_SECONDS = 1.0
 
@@ -234,6 +236,27 @@ class MemorySettings:
 
 
 @dataclass(slots=True, frozen=True)
+class KnowledgeSettings:
+    """How documents are looked up; see `app.models.KnowledgeConfig`."""
+
+    enabled: bool = True
+    chat_uploads: bool = True
+    top_k: int = 5
+    min_score: float = 0.3
+    intent_mode: str = "rules"
+
+    @classmethod
+    def from_model(cls, model: KnowledgeConfig) -> KnowledgeSettings:
+        return cls(
+            enabled=model.enabled,
+            chat_uploads=model.chat_uploads,
+            top_k=model.top_k,
+            min_score=model.min_score,
+            intent_mode=model.intent_mode,
+        )
+
+
+@dataclass(slots=True, frozen=True)
 class ConfigSnapshot:
     settings: BotSettingsSnapshot
     router: Router
@@ -243,6 +266,7 @@ class ConfigSnapshot:
     agent: AgentSettings = AgentSettings()
     embedding: EmbeddingSettings = EmbeddingSettings()
     memory: MemorySettings = MemorySettings()
+    knowledge: KnowledgeSettings = KnowledgeSettings()
 
     def integration_by_name(self, name: str) -> IntegrationSpec | None:
         folded = name.casefold()
@@ -337,6 +361,16 @@ async def ensure_memory_config(session: AsyncSession) -> MemoryConfig:
     return config
 
 
+async def ensure_knowledge_config(session: AsyncSession) -> KnowledgeConfig:
+    """Fetch the singleton knowledge row, creating it with the defaults once."""
+    config = await session.get(KnowledgeConfig, KNOWLEDGE_CONFIG_ID)
+    if config is None:
+        config = KnowledgeConfig(id=KNOWLEDGE_CONFIG_ID)
+        session.add(config)
+        await session.flush()
+    return config
+
+
 async def bump_config_version(session: AsyncSession) -> int:
     """Signal every cache that configuration changed."""
     config = await ensure_bot_config(session)
@@ -383,12 +417,14 @@ class ConfigStore:
                 agent_config = await ensure_agent_config(session)
                 embedding_config = await ensure_embedding_config(session)
                 memory_config = await ensure_memory_config(session)
+                knowledge_config = await ensure_knowledge_config(session)
                 await session.commit()
                 await session.refresh(config)
                 await session.refresh(llm_config)
                 await session.refresh(agent_config)
                 await session.refresh(embedding_config)
                 await session.refresh(memory_config)
+                await session.refresh(knowledge_config)
 
                 commands = list(
                     (await session.scalars(select(Command).order_by(Command.priority, Command.id))).all()
@@ -420,6 +456,7 @@ class ConfigStore:
                 agent=AgentSettings.from_model(agent_config),
                 embedding=EmbeddingSettings.from_model(embedding_config),
                 memory=MemorySettings.from_model(memory_config),
+                knowledge=KnowledgeSettings.from_model(knowledge_config),
             )
             self._snapshot = snapshot
             log.debug(

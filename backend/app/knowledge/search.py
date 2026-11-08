@@ -20,6 +20,20 @@ MAX_QUERY_TERMS = 24
 
 _WORD = re.compile(r"\w+", re.UNICODE)
 
+# Words that say how a question is asked, not what it is about. Searching
+# for them finds nearly every passage. Vietnamese syllables are separate words.
+STOPWORDS = frozenset(
+    """
+    là của và có không cho các những được trong một này đó kia thì mà với để từ khi như
+    về ở tôi bạn mình em anh chị ông bà gì nào sao thế nhé ạ à ơi hãy giúp làm ơn vậy
+    bao nhiêu đâu ai cái chiếc việc nên phải cần muốn biết hỏi xin vui lòng thể theo
+    đã đang sẽ rồi lại cũng chỉ rất quá hay hoặc nếu nhưng vì bởi tại ra vào lên xuống
+    the a an is are was were be been what how why when where who whom which whose do does did
+    of to in on at for and or but if i you me my your we our it its this that these those
+    please can could would should will tell about with from by as into than then there
+    """.split()
+)
+
 
 def rrf(rankings: Iterable[Sequence[Hashable]], k: int = RRF_K) -> list[tuple[Hashable, float]]:
     """Merge ranked lists of ids, best first, as (id, score)."""
@@ -30,14 +44,19 @@ def rrf(rankings: Iterable[Sequence[Hashable]], k: int = RRF_K) -> list[tuple[Ha
     return sorted(scores.items(), key=lambda pair: pair[1], reverse=True)
 
 
-def fts_query(text: str) -> str | None:
+def fts_query(text: str, *, skip_stopwords: bool = False) -> str | None:
     """An FTS5 MATCH expression finding texts with any word of `text`.
 
     Each word is quoted, so nothing the user typed is read as FTS syntax
     (AND, NEAR, column filters, ...). None when there is no word to look for.
+    With `skip_stopwords`, words like "là" and "what" are left out, and a
+    text of nothing else looks for nothing.
     """
+    found = _WORD.findall(text.casefold())
+    if skip_stopwords:
+        found = [word for word in found if word not in STOPWORDS]
     words: list[str] = []
-    for word in _WORD.findall(text.casefold()):
+    for word in found:
         # One letter matches nearly everything; numbers are worth keeping.
         if (len(word) > 1 or word.isdigit()) and word not in words:
             words.append(word)

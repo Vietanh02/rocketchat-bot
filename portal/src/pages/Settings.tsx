@@ -126,6 +126,13 @@ export default function SettingsPage() {
       {notice && <Banner kind={notice.kind}>{notice.text}</Banner>}
       {!isAdmin && <Banner kind="warn">You have read-only access; changes cannot be saved.</Banner>}
 
+      <Card title="Knowledge base" action={<Link to="/knowledge">Open →</Link>}>
+        <p className="muted" style={{ margin: 0 }}>
+          Upload the documents the assistant looks questions up in (PDF, Word, Markdown, text, CSV,
+          HTML), and choose how it tells questions from requests to do something.
+        </p>
+      </Card>
+
       <Card title="Rocket.Chat connection">
         <div className="stack">
           <Field label="REST URL" hint="e.g. http://localhost:3000">

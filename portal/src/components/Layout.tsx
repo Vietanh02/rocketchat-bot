@@ -11,6 +11,7 @@ const NAV = [
   { to: "/llm", label: "Language model" },
   { to: "/assistant", label: "Assistant" },
   { to: "/memory", label: "Memory" },
+  { to: "/knowledge", label: "Knowledge base" },
   { to: "/tasks", label: "Reminders" },
   { to: "/access", label: "Access" },
   { to: "/logs", label: "Logs" },

@@ -230,7 +230,7 @@ class BotService:
             log.warning("Inbound queue is full; dropping message %s", message.message_id)
 
     def _is_actionable(self, message: IncomingMessage) -> bool:
-        if message.is_system or message.is_edit or not message.text.strip():
+        if message.is_system or message.is_edit or not (message.text.strip() or message.files):
             return False
         # Never answer ourselves, and never answer another bot (loop risk).
         if message.sender_id and message.sender_id == self._bot_user_id:

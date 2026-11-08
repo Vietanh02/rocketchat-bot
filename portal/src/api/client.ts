@@ -35,6 +35,11 @@ import type {
   MemoryStatus,
   Profile,
   ProfileUpdate,
+  KbDocument,
+  KbSearchResult,
+  KbStatus,
+  KbUploadResult,
+  KnowledgeConfig,
 } from "./types";
 
 const TOKEN_KEY = "rcbot.portal.token";
@@ -94,7 +99,10 @@ function extractDetail(body: unknown, fallback: string): string {
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
-  if (init.body !== undefined) headers.set("Content-Type", "application/json");
+  // A FormData body sets its own multipart Content-Type.
+  if (init.body !== undefined && !(init.body instanceof FormData)) {
+    headers.set("Content-Type", "application/json");
+  }
   const token = getToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
 
@@ -179,6 +187,22 @@ export const api = {
   updateProfile: (rcUserId: string, changes: ProfileUpdate) =>
     put<Profile>(`/api/memory/profiles/${encodeURIComponent(rcUserId)}`, changes),
   deleteProfile: (rcUserId: string) => del(`/api/memory/profiles/${encodeURIComponent(rcUserId)}`),
+
+  getKnowledgeConfig: () => get<KnowledgeConfig>("/api/knowledge/config"),
+  updateKnowledgeConfig: (changes: Partial<KnowledgeConfig>) =>
+    put<KnowledgeConfig>("/api/knowledge/config", changes),
+  knowledgeStatus: () => get<KbStatus>("/api/knowledge/status"),
+  listDocuments: (source?: "portal" | "chat") =>
+    get<KbDocument[]>(`/api/knowledge/documents${source ? `?source=${source}` : ""}`),
+  uploadDocuments: (files: File[]) => {
+    const form = new FormData();
+    for (const file of files) form.append("files", file, file.name);
+    return request<KbUploadResult[]>("/api/knowledge/documents", { method: "POST", body: form });
+  },
+  deleteDocument: (id: number) => del(`/api/knowledge/documents/${id}`),
+  reindexKnowledge: () => post<KbStatus>("/api/knowledge/reindex"),
+  searchKnowledge: (q: string) =>
+    get<KbSearchResult>(`/api/knowledge/search?q=${encodeURIComponent(q)}`),
 
   listAccess: () => get<AccessEntry[]>("/api/access"),
   addAccess: (usernames: string, note = "") =>

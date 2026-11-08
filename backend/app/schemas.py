@@ -591,6 +591,10 @@ class AgentRunOut(BaseModel):
     total_ms: int | None
     overhead_ms: float | None
     error: str | None
+    # lookup|command|chat|upload, when known.
+    intent: str | None = None
+    # Where passages came from: conversation|base|none.
+    kb: str | None = None
 
 
 class AgentStatsOut(BaseModel):
@@ -748,3 +752,74 @@ class ProfileUpdate(BaseModel):
     language: str | None = Field(default=None, max_length=64)
     timezone: str | None = Field(default=None, max_length=64)
     about: str | None = Field(default=None, max_length=1000)
+
+
+# --------------------------------------------------------------------------- #
+# Knowledge base
+# --------------------------------------------------------------------------- #
+
+
+class KnowledgeConfigOut(BaseModel):
+    enabled: bool
+    chat_uploads: bool
+    top_k: int
+    min_score: float
+    intent_mode: Literal["rules", "model"]
+
+
+class KnowledgeConfigUpdate(BaseModel):
+    enabled: bool | None = None
+    chat_uploads: bool | None = None
+    top_k: int | None = Field(default=None, ge=1, le=15)
+    min_score: float | None = Field(default=None, ge=0, le=1)
+    intent_mode: Literal["rules", "model"] | None = None
+
+
+class KbDocumentOut(BaseModel):
+    id: int
+    scope: str
+    title: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    pages: int | None
+    chunks: int
+    chars: int
+    truncated: bool
+    source: str
+    uploaded_by: str | None
+    created_at: datetime | None
+    # Passages without a vector of the current model yet.
+    pending: int = 0
+
+
+class KbUploadResult(BaseModel):
+    filename: str
+    ok: bool
+    message: str
+    document: KbDocumentOut | None = None
+
+
+class KbPassageOut(BaseModel):
+    id: int
+    document_id: int
+    scope: str
+    label: str
+    text: str
+    score: float | None
+
+
+class KbSearchOut(BaseModel):
+    intent: str
+    intent_by: str
+    # "conversation", "base" or null: where the passages came from.
+    source: str | None
+    passages: list[KbPassageOut]
+
+
+class KbStatusOut(BaseModel):
+    documents: int
+    chat_documents: int
+    passages: int
+    pending: int
+    semantic: bool

@@ -18,6 +18,7 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.agent.intent import LOOKUP
 from app.agent.queue import MERGED, QueueFull
 from app.agent.runner import AgentResult, AgentRunner, AgentTurn
 from app.agent.timing import TurnTimer
@@ -37,8 +38,12 @@ from app.integrations.executor import (
     execute_integration,
 )
 from app.integrations.templating import TemplateRenderError, render
+from app.knowledge.base import DocumentError
+from app.knowledge.parsers import MAX_FILE_BYTES, is_supported
 from app.models import ResponderMode, ResponseType
+from app.rocketchat.ddp import RcFile
 from app.rocketchat.gateway import Gateway
+from app.rocketchat.rest import RocketChatError
 from app.scheduler.service import SchedulerService
 
 log = logging.getLogger(__name__)
@@ -48,6 +53,8 @@ GatewayProvider = Callable[[], Gateway | None]
 # A gateway URL that passed the private-host check is trusted this long, so
 # answering does not resolve the host's DNS on every message.
 GATEWAY_CHECK_TTL_SECONDS = 300.0
+# Documents read from one message; more are ignored.
+MAX_DOCUMENTS_PER_MESSAGE = 5
 
 
 class Responder(Protocol):
@@ -265,11 +272,97 @@ class RuleResponder:
         post: bool = True,
     ) -> Reply | None:
         question = message.clean_text or message.text
-        if not question.strip():
+        files = self._documents_in(message, snapshot)
+        if not question.strip() and not files:
             return None
         timer = TurnTimer(started=message.arrived)
         # Show at once that the bot is on it; the answer takes seconds.
         ack = self._ack(message, snapshot, timer) if post else None
+
+        intent: str | None = None
+        problems: list[str] = []
+        if files:
+            # Documents sent with the message are read first, for this conversation.
+            with timer.waiting("tools"):
+                read, problems = await self._read_documents(message, snapshot, files)
+            timer.labels["documents"] = str(len(read))
+            if not question.strip():
+                timer.labels["intent"] = "upload"
+                lines = read + problems
+                if read:
+                    lines.append("Ask me anything about it. Send `new` to forget it.")
+                error = None if read else "no document could be read"
+                return self._model_reply(
+                    message, "\n".join(lines), snapshot, timer, AgentResult("", "ok"), ack, error=error
+                )
+            if read:
+                # A question sent with a document is about the document.
+                intent = LOOKUP
+        reply = await self._ask_model(message, snapshot, live, chat, question, timer, ack, intent)
+        if problems and reply is not None:
+            reply.text = "\n\n".join([reply.text, *problems])
+        return reply
+
+    def _documents_in(self, message: MessageContext, snapshot: ConfigSnapshot) -> list[RcFile]:
+        """The files of `message` to read as documents, if reading them is on."""
+        knowledge = snapshot.knowledge
+        if not (knowledge.enabled and knowledge.chat_uploads):
+            return []
+        return [f for f in message.files if is_supported(f.name, f.type)][:MAX_DOCUMENTS_PER_MESSAGE]
+
+    async def _read_documents(
+        self, message: MessageContext, snapshot: ConfigSnapshot, files: list[RcFile]
+    ) -> tuple[list[str], list[str]]:
+        """Read the files into the conversation's documents: (what was read, what failed)."""
+        gateway = self._gateway_provider()
+        scope = self.agent.documents_scope(message, self._thread_for(message, snapshot))
+        read: list[str] = []
+        problems: list[str] = []
+        for file in files:
+            if gateway is None:
+                problems.append(f":warning: Could not fetch *{file.name}*: not connected.")
+                continue
+            if file.size > MAX_FILE_BYTES:
+                problems.append(
+                    f":warning: *{file.name}* is larger than {MAX_FILE_BYTES // (1024 * 1024)} MB."
+                )
+                continue
+            try:
+                data = await gateway.download_file(file.url, max_bytes=MAX_FILE_BYTES)
+                info, created = await self.agent.kb.add(
+                    scope,
+                    file.name,
+                    data,
+                    content_type=file.type,
+                    embedding=snapshot.embedding,
+                    source="chat",
+                    uploaded_by=message.sender_username,
+                )
+            except (RocketChatError, DocumentError) as exc:
+                log.info("Could not read %s from %s: %s", file.name, message.message_id, exc)
+                problems.append(f":warning: Could not read *{file.name}*: {exc}.")
+                continue
+            if not created:
+                read.append(f":page_facing_up: I already have *{file.name}* in this conversation.")
+                continue
+            size = f"{info.pages} pages, " if info.pages else ""
+            note = " (only the beginning: it is very long)" if info.truncated else ""
+            read.append(
+                f":page_facing_up: Read *{file.name}*: {size}{info.chunks} passages{note}."
+            )
+        return read, problems
+
+    async def _ask_model(
+        self,
+        message: MessageContext,
+        snapshot: ConfigSnapshot,
+        live: LiveReply | None,
+        chat: LLMChat,
+        question: str,
+        timer: TurnTimer,
+        ack: asyncio.Task | None,
+        intent: str | None,
+    ) -> Reply | None:
         if not message.is_direct and message.sender_username:
             # Several people share a channel's conversation; say who is talking.
             question = f"@{message.sender_username}: {question}"
@@ -295,7 +388,9 @@ class RuleResponder:
             def shape(text: str, *, partial: bool = False) -> str:
                 return strip_thinking(text, partial=partial)
 
-        turn = AgentTurn(message, question, self._thread_for(message, snapshot), timer, live)
+        turn = AgentTurn(
+            message, question, self._thread_for(message, snapshot), timer, live, intent=intent
+        )
         try:
             result = await self.agent.answer(
                 turn, snapshot=snapshot, chat=chat, tools=tools, shape=shape

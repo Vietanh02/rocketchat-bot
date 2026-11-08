@@ -36,6 +36,8 @@ class Gateway(Protocol):
 
     async def react(self, message_id: str, emoji: str, *, on: bool = True) -> None: ...
 
+    async def download_file(self, path: str, *, max_bytes: int) -> bytes: ...
+
     async def resolve_dm_room(self, username: str) -> str: ...
 
     async def resolve_channel_room(self, name: str) -> str: ...
@@ -62,6 +64,9 @@ class LiveGateway:
 
     async def react(self, message_id: str, emoji: str, *, on: bool = True) -> None:
         await self.rest.react(message_id, emoji, should_react=on)
+
+    async def download_file(self, path: str, *, max_bytes: int) -> bytes:
+        return await self.rest.download(path, max_bytes=max_bytes)
 
     async def resolve_dm_room(self, username: str) -> str:
         cached = self._dm_cache.get(username)
@@ -91,6 +96,8 @@ class FakeGateway:
         self.fail_updates: Exception | None = None
         # Reactions currently on, as (message_id, emoji).
         self.reactions: list[tuple[str, str]] = []
+        # Files that can be downloaded, by path.
+        self.files: dict[str, bytes] = {}
 
     async def send_message(
         self, room_id: str, text: str, *, thread_id: str | None = None
@@ -119,6 +126,14 @@ class FakeGateway:
             self.reactions.append((message_id, emoji))
         elif (message_id, emoji) in self.reactions:
             self.reactions.remove((message_id, emoji))
+
+    async def download_file(self, path: str, *, max_bytes: int) -> bytes:
+        if path not in self.files:
+            raise RocketChatError(f"GET {path} -> HTTP 404")
+        data = self.files[path]
+        if len(data) > max_bytes:
+            raise RocketChatError(f"the file is larger than {max_bytes // (1024 * 1024)} MB")
+        return data
 
     async def resolve_dm_room(self, username: str) -> str:
         return self.dm_rooms.setdefault(username, f"dm-{username}")

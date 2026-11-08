@@ -84,6 +84,10 @@ def _run_out(run: AgentRun) -> AgentRunOut:
         tools = json.loads(run.tools_json or "[]")
     except ValueError:
         tools = []
+    try:
+        labels = json.loads(run.timings_json or "{}").get("labels") or {}
+    except (ValueError, AttributeError):
+        labels = {}
     return AgentRunOut(
         id=run.id,
         started_at=run.started_at,
@@ -97,6 +101,8 @@ def _run_out(run: AgentRun) -> AgentRunOut:
         total_ms=run.total_ms,
         overhead_ms=run.overhead_ms,
         error=run.error,
+        intent=labels.get("intent"),
+        kb=labels.get("kb"),
     )
 
 

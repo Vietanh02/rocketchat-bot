@@ -18,6 +18,7 @@ import time
 import logging
 import random
 import uuid
+from urllib.parse import quote
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -49,6 +50,40 @@ class IncomingMessage:
     raw: dict[str, Any] = field(default_factory=dict)
     # time.monotonic() when it was read off the socket, to time the reply.
     arrived: float = field(default_factory=time.monotonic)
+    # Files sent with the message.
+    files: tuple[RcFile, ...] = ()
+
+
+@dataclass(slots=True, frozen=True)
+class RcFile:
+    """A file attached to a message; `url` is a path on the Rocket.Chat server."""
+
+    id: str
+    name: str
+    type: str = ""
+    size: int = 0
+    url: str = ""
+
+
+def parse_files(msg: dict[str, Any]) -> tuple[RcFile, ...]:
+    """The files of a message: `files` (Rocket.Chat 6+) or `file`, with their links."""
+    entries = msg.get("files") or ([msg["file"]] if isinstance(msg.get("file"), dict) else [])
+    links: dict[str, str] = {}
+    for attachment in msg.get("attachments") or []:
+        if isinstance(attachment, dict) and attachment.get("title_link") and attachment.get("title"):
+            links.setdefault(str(attachment["title"]), str(attachment["title_link"]))
+    files = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not entry.get("_id") or not entry.get("name"):
+            continue
+        name = str(entry["name"])
+        url = links.get(name) or f"/file-upload/{entry['_id']}/{quote(name)}"
+        try:
+            size = int(entry.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        files.append(RcFile(str(entry["_id"]), name, str(entry.get("type") or ""), size, url))
+    return tuple(files)
 
 
 MessageHandler = Callable[[IncomingMessage], Awaitable[None]]
@@ -79,6 +114,7 @@ def parse_message(args: list[Any]) -> IncomingMessage | None:
         is_system=bool(msg.get("t")),
         is_bot=bool(msg.get("bot")),
         raw=msg,
+        files=parse_files(msg),
     )
 
 

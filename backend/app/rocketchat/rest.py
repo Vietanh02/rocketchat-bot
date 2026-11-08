@@ -115,6 +115,27 @@ class RocketChatRest:
             json={"roomId": room_id, "msgId": message_id, "text": text},
         )
 
+    async def download(self, path: str, *, max_bytes: int) -> bytes:
+        """A file uploaded to Rocket.Chat, by its path (as in a message's attachment)."""
+        if not path.startswith(("/file-upload/", "/ufs/")):
+            raise RocketChatError(f"not a Rocket.Chat file: {path!r}")
+        data = bytearray()
+        try:
+            async with self._client.stream(
+                "GET", f"{self.base_url}{path}", headers=self._headers()
+            ) as response:
+                if response.status_code >= 400:
+                    raise RocketChatError(f"GET {path} -> HTTP {response.status_code}")
+                async for piece in response.aiter_bytes():
+                    data.extend(piece)
+                    if len(data) > max_bytes:
+                        raise RocketChatError(
+                            f"the file is larger than {max_bytes // (1024 * 1024)} MB"
+                        )
+        except httpx.HTTPError as exc:
+            raise RocketChatError(f"GET {path} failed: {exc}") from exc
+        return bytes(data)
+
     async def react(self, message_id: str, emoji: str, *, should_react: bool = True) -> None:
         """Add (or with `should_react=False`, remove) the bot's reaction to a message."""
         await self._request(

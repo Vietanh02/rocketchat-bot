@@ -325,6 +325,8 @@ export interface AgentRun {
   total_ms: number | null;
   overhead_ms: number | null;
   error: string | null;
+  intent: string | null;
+  kb: string | null;
 }
 
 export interface AgentStats {
@@ -438,3 +440,65 @@ export interface Profile {
 }
 
 export type ProfileUpdate = Partial<Omit<Profile, "rc_user_id" | "notes" | "updated_at">>;
+
+// ------------------------------------------------------------------------- //
+// Knowledge base
+// ------------------------------------------------------------------------- //
+
+export type IntentMode = "rules" | "model";
+
+export interface KnowledgeConfig {
+  enabled: boolean;
+  chat_uploads: boolean;
+  top_k: number;
+  min_score: number;
+  intent_mode: IntentMode;
+}
+
+export interface KbDocument {
+  id: number;
+  scope: string;
+  title: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  pages: number | null;
+  chunks: number;
+  chars: number;
+  truncated: boolean;
+  source: "portal" | "chat" | string;
+  uploaded_by: string | null;
+  created_at: string | null;
+  pending: number;
+}
+
+export interface KbUploadResult {
+  filename: string;
+  ok: boolean;
+  message: string;
+  document: KbDocument | null;
+}
+
+export interface KbPassage {
+  id: number;
+  document_id: number;
+  scope: string;
+  label: string;
+  text: string;
+  score: number | null;
+}
+
+export interface KbSearchResult {
+  intent: "lookup" | "command" | "chat" | string;
+  intent_by: string;
+  source: string | null;
+  passages: KbPassage[];
+}
+
+export interface KbStatus {
+  documents: number;
+  chat_documents: number;
+  passages: number;
+  pending: number;
+  semantic: boolean;
+}

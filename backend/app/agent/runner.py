@@ -18,23 +18,27 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.agent.intent import COMMAND, LOOKUP, Intent, about_a_document, detect
 from app.agent.memory import MemoryScopes, MemoryStore, Note, NoteError
 from app.agent.profiles import ProfileStore
-from app.agent.prompt import build_messages
+from app.agent.prompt import COMMAND_NOTE, build_messages, passages_block
 from app.agent.queue import MERGED, SessionQueue
 from app.agent.session import SessionState, SessionStore, session_key
 from app.agent.timing import TurnTimer
 from app.agent.tools import ToolProvider, ToolRegistry
+from app.agent.tools.knowledge import KnowledgeTools
 from app.agent.tools.memory import MemoryTools, ProfileTools
 from app.bot.llm import LLMError
 from app.bot.rcformat import strip_thinking
 from app.bot.types import MessageContext
+from app.knowledge.base import BASE_SCOPE, KnowledgeBase, Lookup, Passage, conversation_scope
 from app.knowledge.service import KnowledgeService
 from app.models import AgentRun, QueueMode
 
@@ -82,6 +86,8 @@ class AgentTurn:
     thread_id: str | None
     timer: TurnTimer
     live: LiveReply | None = None
+    # Set when the kind of message is already known (a document came with it).
+    intent: str | None = None
 
 
 @dataclass(slots=True)
@@ -107,6 +113,7 @@ class AgentRunner:
         self.sessions = SessionStore(session_factory)
         self.memory = MemoryStore(session_factory, self.knowledge)
         self.profiles = ProfileStore(session_factory)
+        self.kb = KnowledgeBase(session_factory, self.knowledge)
         self.queue = SessionQueue()
         self._background: set[asyncio.Task] = set()
         self._compacting: set[str] = set()
@@ -138,7 +145,14 @@ class AgentRunner:
         return await self.queue.submit(key, turn, handle, collect=collect)
 
     async def reset(self, message: MessageContext, thread_id: str | None) -> bool:
-        return await self.sessions.reset(self.key_for(message, thread_id))
+        """Start the conversation afresh, forgetting the documents sent in it too."""
+        key = self.key_for(message, thread_id)
+        documents = await self.kb.forget_scope(conversation_scope(key))
+        return await self.sessions.reset(key) or bool(documents)
+
+    def documents_scope(self, message: MessageContext, thread_id: str | None) -> str:
+        """Where documents sent in this conversation are kept."""
+        return conversation_scope(self.key_for(message, thread_id))
 
     # ----------------------------------------------------------------- #
 
@@ -161,21 +175,51 @@ class AgentRunner:
         settings = snapshot.agent
 
         memory_on = snapshot.memory.enabled
+        knowledge_on = snapshot.knowledge.enabled
         scopes = MemoryScopes.for_conversation(turn.message, kind)
+        documents = conversation_scope(key)
         # Profiles are part of what is remembered, and private to DMs.
         direct = memory_on and kind == "dm" and bool(turn.message.sender_id)
         if memory_on:
             self.memory.ensure_indexed(snapshot.embedding)
-        # The conversation, its notes and the person's profile, side by side.
-        with timer.waiting("retrieval" if memory_on else "db"):
-            state, notes, profile = await asyncio.gather(
+        if knowledge_on:
+            self.kb.ensure_indexed(snapshot.embedding)
+
+        # A question to look up, a request to do something, or small talk?
+        wording = turn.message.clean_text or turn.message.text
+        if turn.intent:
+            intent = Intent(turn.intent, "given")
+        else:
+            intent = await detect(
+                wording,
+                mode=snapshot.knowledge.intent_mode,
+                chat=chat,
+                fast_model=snapshot.agent.fast_model,
+            )
+        timer.labels["intent"] = intent.kind
+        timer.labels["intent_by"] = intent.by
+        timer.mark("intent")
+
+        # The conversation, its notes, the person's profile and the passages
+        # for the question, side by side.
+        with timer.waiting("retrieval" if memory_on or knowledge_on else "db"):
+            state, notes, profile, (lookup, available) = await asyncio.gather(
                 self.sessions.open(
                     key, kind, turn.message, idle_reset_minutes=settings.idle_reset_minutes
                 ),
                 self._recall(question, scopes, snapshot) if memory_on else _nothing(),
                 self.profiles.get(turn.message.sender_id) if direct else _nothing(),
+                self._look_up(wording, intent, documents, snapshot) if knowledge_on else _no_lookup(),
             )
         timer.mark("session_loaded")
+        passages = lookup.passages if lookup is not None else []
+        if lookup is not None:
+            timer.labels["kb"] = lookup.source or "none"
+        context = ""
+        if passages:
+            context = passages_block([(p.label, p.text) for p in passages], lookup.source or "")
+        elif intent.kind == COMMAND:
+            context = COMMAND_NOTE
         messages = build_messages(
             chat.system_prompt,
             bot_name=snapshot.settings.bot_username or "the bot",
@@ -185,6 +229,7 @@ class AgentRunner:
             question=question,
             profile=profile.prompt_text() if profile else "",
             notes=[(note.id, note.text) for note in notes or ()],
+            context=context,
         )
         timer.mark("prompt_built")
 
@@ -203,6 +248,16 @@ class AgentRunner:
         if direct:
             providers.append(
                 ProfileTools(self.profiles, turn.message.sender_id, turn.message.sender_username)
+            )
+        if available:
+            providers.append(
+                KnowledgeTools(
+                    self.kb,
+                    documents,
+                    snapshot.embedding,
+                    available=available,
+                    min_score=snapshot.knowledge.min_score,
+                )
             )
         registry = ToolRegistry(providers)
 
@@ -262,7 +317,32 @@ class AgentRunner:
                     self._extract(question, answer, notes or [], scopes, turn, state, snapshot, chat),
                     f"remember-{key}",
                 )
-        return AgentResult(answer, status, error, state.id, chat.model, len(turns))
+        # The transcript keeps the model's words; the reply also lists the sources.
+        shown = with_sources(answer, passages) if answer else answer
+        return AgentResult(shown, status, error, state.id, chat.model, len(turns))
+
+    async def _look_up(
+        self, question: str, intent: Intent, documents: str, snapshot: ConfigSnapshot
+    ) -> tuple[Lookup | None, set[str]]:
+        """Passages for a question to look up, and which documents the conversation can search."""
+        try:
+            if intent.kind != LOOKUP:
+                return None, await self.kb.scopes_with_documents([documents, BASE_SCOPE])
+            lookup = await self.kb.lookup(
+                question,
+                documents,
+                embedding=snapshot.embedding,
+                limit=snapshot.knowledge.top_k,
+                min_score=snapshot.knowledge.min_score,
+                # Sent with a document, or talking about one.
+                about_document=intent.by == "given" or about_a_document(question),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - answer without passages rather than not at all
+            log.warning("Could not look up %r in the documents", question[:80], exc_info=True)
+            return None, set()
+        return lookup, lookup.available
 
     async def _recall(
         self, question: str, scopes: MemoryScopes, snapshot: ConfigSnapshot
@@ -434,11 +514,32 @@ class AgentRunner:
                 await task
         self._compacting.clear()
         await self.memory.close()
+        await self.kb.close()
         await self.knowledge.aclose()
 
 
 async def _nothing() -> None:
     return None
+
+
+async def _no_lookup() -> tuple[None, set[str]]:
+    return None, set()
+
+
+_CITATION = re.compile(r"\[(\d{1,2})\]")
+
+
+def with_sources(answer: str, passages: list[Passage]) -> str:
+    """`answer` with the passages it cites ([1], [2], ...) listed after it."""
+    if not passages:
+        return answer
+    cited = sorted(
+        {int(n) for n in _CITATION.findall(answer) if 1 <= int(n) <= len(passages)}
+    )
+    if not cited:
+        return answer
+    sources = " · ".join(f"[{n}] {passages[n - 1].label}" for n in cited)
+    return f"{answer}\n\n_Sources: {sources}_"
 
 
 def parse_notes(raw: str) -> list[str]:

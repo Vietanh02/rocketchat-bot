@@ -13,6 +13,7 @@ import LLMPage from "./pages/LLM";
 import AssistantPage from "./pages/Assistant";
 import LoginPage from "./pages/Login";
 import LogsPage from "./pages/Logs";
+import KnowledgePage from "./pages/Knowledge";
 import MemoryPage from "./pages/Memory";
 import SettingsPage from "./pages/Settings";
 import TasksPage from "./pages/Tasks";
@@ -32,6 +33,7 @@ function App() {
         <Route path="/llm" element={<LLMPage />} />
         <Route path="/assistant" element={<AssistantPage />} />
         <Route path="/memory" element={<MemoryPage />} />
+        <Route path="/knowledge" element={<KnowledgePage />} />
         <Route path="/tasks" element={<TasksPage />} />
         <Route path="/access" element={<AccessPage />} />
         <Route path="/logs" element={<LogsPage />} />

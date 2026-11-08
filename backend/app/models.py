@@ -649,3 +649,104 @@ class EmbeddingCache(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, index=True
     )
+
+
+# --------------------------------------------------------------------------- #
+# Knowledge base: documents uploaded on the portal or sent in a conversation
+# --------------------------------------------------------------------------- #
+
+
+class IntentMode(str, enum.Enum):
+    # Patterns of the wording alone; instant.
+    rules = "rules"
+    # The patterns, and the fast model for messages they cannot tell.
+    model = "model"
+
+
+class KnowledgeConfig(Base, TimestampMixin):
+    """How the assistant looks things up in documents (single row)."""
+
+    __tablename__ = "knowledge_config"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    # Look up questions in the documents, and offer the kb_search tool.
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Read documents people send in a conversation, for that conversation.
+    chat_uploads: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Passages put in front of a question that asks to look something up.
+    top_k: Mapped[int] = mapped_column(Integer, default=5)
+    # A passage found only by meaning must be at least this similar (cosine).
+    min_score: Mapped[float] = mapped_column(Float, default=0.3)
+    # How questions are told apart from requests to do something.
+    intent_mode: Mapped[str] = mapped_column(String(16), default=IntentMode.rules.value)
+
+
+class KbDocument(Base, TimestampMixin):
+    """One uploaded document.
+
+    `scope` is "base" for the knowledge base set up on the portal, or
+    "conv:<session key>" for a document someone sent in a conversation,
+    which only that conversation reads.
+    """
+
+    __tablename__ = "kb_document"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scope: Mapped[str] = mapped_column(String(300), index=True)
+    title: Mapped[str] = mapped_column(String(300))
+    filename: Mapped[str] = mapped_column(String(300))
+    content_type: Mapped[str] = mapped_column(String(128), default="")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    # sha256 of the file, so the same file is not added twice to a scope.
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="ready")  # ready|error
+    error: Mapped[str | None] = mapped_column(Text)
+    pages: Mapped[int | None] = mapped_column(Integer)
+    chunks: Mapped[int] = mapped_column(Integer, default=0)
+    chars: Mapped[int] = mapped_column(Integer, default=0)
+    truncated: Mapped[bool] = mapped_column(Boolean, default=False)
+    source: Mapped[str] = mapped_column(String(16), default="portal")  # portal|chat
+    uploaded_by: Mapped[str | None] = mapped_column(String(255))
+
+
+class KbChunk(Base):
+    """One passage of a document, the unit that is searched and cited."""
+
+    __tablename__ = "kb_chunk"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("kb_document.id", ondelete="CASCADE"), index=True
+    )
+    # Copied from the document, so searches filter without a join.
+    scope: Mapped[str] = mapped_column(String(300), index=True)
+    ord: Mapped[int] = mapped_column(Integer)
+    text: Mapped[str] = mapped_column(Text)
+    heading: Mapped[str] = mapped_column(String(300), default="")
+    page: Mapped[int | None] = mapped_column(Integer)
+    # The embedding model its vector was made with; "" when it has none yet.
+    embedded_model: Mapped[str] = mapped_column(String(64), default="", index=True)
+
+
+# Word search over passages, kept in step by triggers like agent_memory_fts.
+KB_FTS_DDL = (
+    "CREATE VIRTUAL TABLE IF NOT EXISTS kb_chunk_fts USING fts5("
+    "text, heading, content='kb_chunk', content_rowid='id', "
+    "tokenize='unicode61 remove_diacritics 2')",
+    "CREATE TRIGGER IF NOT EXISTS kb_chunk_ai AFTER INSERT ON kb_chunk BEGIN "
+    "INSERT INTO kb_chunk_fts(rowid, text, heading) VALUES (new.id, new.text, new.heading); END",
+    "CREATE TRIGGER IF NOT EXISTS kb_chunk_ad AFTER DELETE ON kb_chunk BEGIN "
+    "INSERT INTO kb_chunk_fts(kb_chunk_fts, rowid, text, heading) "
+    "VALUES ('delete', old.id, old.text, old.heading); END",
+    "CREATE TRIGGER IF NOT EXISTS kb_chunk_au AFTER UPDATE OF text, heading ON kb_chunk BEGIN "
+    "INSERT INTO kb_chunk_fts(kb_chunk_fts, rowid, text, heading) "
+    "VALUES ('delete', old.id, old.text, old.heading); "
+    "INSERT INTO kb_chunk_fts(rowid, text, heading) VALUES (new.id, new.text, new.heading); END",
+)
+for _statement in KB_FTS_DDL:
+    event.listen(KbChunk.__table__, "after_create", DDL(_statement).execute_if(dialect="sqlite"))
+event.listen(
+    KbChunk.__table__,
+    "before_drop",
+    DDL("DROP TABLE IF EXISTS kb_chunk_fts").execute_if(dialect="sqlite"),
+)

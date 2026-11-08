@@ -38,6 +38,8 @@ class TurnTimer:
     tools: list[ToolTiming] = field(default_factory=list)
     rounds: int = 0
     ended: float | None = None
+    # What kind of turn it was, e.g. {"intent": "lookup", "kb": "base"}.
+    labels: dict[str, str] = field(default_factory=dict)
 
     def now_ms(self) -> float:
         return (time.monotonic() - self.started) * 1000
@@ -83,6 +85,7 @@ class TurnTimer:
                 {"name": tool.name, "ms": round(tool.ms, 2), "ok": tool.ok} for tool in self.tools
             ],
             "rounds": self.rounds,
+            "labels": dict(self.labels),
             "total_ms": round(self.total_ms, 2),
             "overhead_ms": round(self.overhead_ms, 3),
         }
