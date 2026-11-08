@@ -6,7 +6,9 @@ import enum
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    DDL,
     Boolean,
+    LargeBinary,
     DateTime,
     Float,
     ForeignKey,
@@ -14,6 +16,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -494,3 +497,155 @@ class AgentRun(Base):
     total_ms: Mapped[int | None] = mapped_column(Integer)
     overhead_ms: Mapped[float | None] = mapped_column(Float)
     error: Mapped[str | None] = mapped_column(Text)
+
+
+# --------------------------------------------------------------------------- #
+# Vector search and the assistant's memory
+# --------------------------------------------------------------------------- #
+
+
+class EmbeddingProvider(str, enum.Enum):
+    # Nothing set up: searches match words only.
+    none = ""
+    # POST {base_url}/embeddings, as OpenAI and most gateways serve it.
+    openai = "openai"
+    # Hugging Face text-embeddings-inference: POST {base_url}/embed.
+    tei = "tei"
+
+
+class RerankProvider(str, enum.Enum):
+    none = ""
+    # text-embeddings-inference: POST {base_url}/rerank.
+    tei = "tei"
+    # POST {base_url}/rerank with {model, query, documents}, as Cohere, Jina
+    # and LiteLLM serve it.
+    cohere = "cohere"
+
+
+class EmbeddingConfig(Base, TimestampMixin):
+    """How text is turned into vectors, and optionally reranked (single row).
+
+    Shared by memory now and the knowledge base later. Changing the model
+    makes every stored text be embedded again.
+    """
+
+    __tablename__ = "embedding_config"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    provider: Mapped[str] = mapped_column(String(16), default=EmbeddingProvider.none.value)
+    base_url: Mapped[str] = mapped_column(String(512), default="")
+    api_key_enc: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(String(256), default="")
+    # Asked of models that can shorten their vectors; None takes the model's own.
+    dimensions: Mapped[int | None] = mapped_column(Integer)
+    # Put before questions and before stored texts, for models trained that
+    # way (e5: "query: " and "passage: ").
+    query_prefix: Mapped[str] = mapped_column(String(64), default="")
+    document_prefix: Mapped[str] = mapped_column(String(64), default="")
+    timeout_seconds: Mapped[float] = mapped_column(Float, default=30.0)
+    rerank_provider: Mapped[str] = mapped_column(String(16), default=RerankProvider.none.value)
+    rerank_base_url: Mapped[str] = mapped_column(String(512), default="")
+    rerank_api_key_enc: Mapped[str | None] = mapped_column(Text)
+    rerank_model: Mapped[str] = mapped_column(String(256), default="")
+
+
+class MemoryConfig(Base, TimestampMixin):
+    """What the assistant remembers between conversations (single row)."""
+
+    __tablename__ = "memory_config"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    # Offer the memory tools and show remembered notes to the model.
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # After each answer, the fast model picks facts worth keeping.
+    auto_extract: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Notes put in front of each question, the most relevant first; 0 none.
+    prompt_notes: Mapped[int] = mapped_column(Integer, default=5)
+    # A note found only by meaning must be at least this similar (cosine).
+    min_score: Mapped[float] = mapped_column(Float, default=0.35)
+
+
+class AgentMemory(Base, TimestampMixin):
+    """One note the assistant keeps across conversations.
+
+    `scope` says who can see it: "user:<rc user id>" (that person's DMs),
+    "room:<room id>" (that channel and its threads) or "global" (everyone;
+    written on the portal only). It always comes from where the conversation
+    happens, never from what the model asks for.
+    """
+
+    __tablename__ = "agent_memory"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scope: Mapped[str] = mapped_column(String(160), index=True)
+    text: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(16), default="tool")  # tool|auto|portal
+    # Who it was learnt from, for the portal.
+    created_by: Mapped[str | None] = mapped_column(String(128))
+    session_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_session.id", ondelete="SET NULL")
+    )
+    # The embedding model its vector was made with; "" when it has none yet.
+    embedded_model: Mapped[str] = mapped_column(String(512), default="", index=True)
+
+
+# Word search over notes: an FTS5 index kept in step with agent_memory by
+# triggers, created and dropped with the table. Accents are ignored, so
+# "nha" finds "nhà".
+_MEMORY_FTS = [
+    "CREATE VIRTUAL TABLE IF NOT EXISTS agent_memory_fts USING fts5("
+    "text, content='agent_memory', content_rowid='id', "
+    "tokenize='unicode61 remove_diacritics 2')",
+    "CREATE TRIGGER IF NOT EXISTS agent_memory_ai AFTER INSERT ON agent_memory BEGIN "
+    "INSERT INTO agent_memory_fts(rowid, text) VALUES (new.id, new.text); END",
+    "CREATE TRIGGER IF NOT EXISTS agent_memory_ad AFTER DELETE ON agent_memory BEGIN "
+    "INSERT INTO agent_memory_fts(agent_memory_fts, rowid, text) "
+    "VALUES ('delete', old.id, old.text); END",
+    "CREATE TRIGGER IF NOT EXISTS agent_memory_au AFTER UPDATE OF text ON agent_memory BEGIN "
+    "INSERT INTO agent_memory_fts(agent_memory_fts, rowid, text) "
+    "VALUES ('delete', old.id, old.text); "
+    "INSERT INTO agent_memory_fts(rowid, text) VALUES (new.id, new.text); END",
+]
+MEMORY_FTS_DDL = tuple(_MEMORY_FTS)
+for _statement in MEMORY_FTS_DDL:
+    event.listen(
+        AgentMemory.__table__, "after_create", DDL(_statement).execute_if(dialect="sqlite")
+    )
+event.listen(
+    AgentMemory.__table__,
+    "before_drop",
+    DDL("DROP TABLE IF EXISTS agent_memory_fts").execute_if(dialect="sqlite"),
+)
+
+
+class AgentUserProfile(Base, TimestampMixin):
+    """What the assistant knows about one Rocket.Chat user, shown in their DMs."""
+
+    __tablename__ = "agent_user_profile"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    rc_user_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    username: Mapped[str] = mapped_column(String(128), default="", index=True)
+    # How they like to be called.
+    display_name: Mapped[str] = mapped_column(String(128), default="")
+    # The language to answer in, e.g. "Vietnamese".
+    language: Mapped[str] = mapped_column(String(64), default="")
+    # IANA name, e.g. "Asia/Ho_Chi_Minh"; "" uses the bot's default.
+    timezone: Mapped[str] = mapped_column(String(64), default="")
+    # Free text: role, team, how they like answers.
+    about: Mapped[str] = mapped_column(Text, default="")
+
+
+class EmbeddingCache(Base):
+    """Vectors already computed, so the same text is never embedded twice."""
+
+    __tablename__ = "embedding_cache"
+
+    # sha256 of the model id and the exact text sent.
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    model: Mapped[str] = mapped_column(String(512), index=True)
+    # float32, little-endian.
+    vector: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )

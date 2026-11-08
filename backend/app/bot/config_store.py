@@ -24,6 +24,8 @@ from app.integrations.executor import IntegrationSpec
 from app.models import (
     AgentConfig,
     BotAccessEntry,
+    EmbeddingConfig,
+    MemoryConfig,
     BotConfig,
     Command,
     Integration,
@@ -37,6 +39,8 @@ log = logging.getLogger(__name__)
 BOT_CONFIG_ID = 1
 LLM_CONFIG_ID = 1
 AGENT_CONFIG_ID = 1
+EMBEDDING_CONFIG_ID = 1
+MEMORY_CONFIG_ID = 1
 # How long a snapshot is used before its version is compared with the database.
 VERSION_CHECK_SECONDS = 1.0
 
@@ -147,6 +151,89 @@ class AgentSettings:
 
 
 @dataclass(slots=True, frozen=True)
+class EmbeddingSettings:
+    """How to embed and rerank text; see `app.models.EmbeddingConfig`."""
+
+    provider: str = ""
+    base_url: str = ""
+    api_key: str | None = None
+    model: str = ""
+    dimensions: int | None = None
+    query_prefix: str = ""
+    document_prefix: str = ""
+    timeout_seconds: float = 30.0
+    rerank_provider: str = ""
+    rerank_base_url: str = ""
+    rerank_api_key: str | None = None
+    rerank_model: str = ""
+
+    @property
+    def configured(self) -> bool:
+        # A local text-embeddings-inference server needs no key and no model.
+        if self.provider == "tei":
+            return bool(self.base_url)
+        return bool(self.provider and self.base_url and self.model)
+
+    @property
+    def rerank_configured(self) -> bool:
+        if self.rerank_provider == "tei":
+            return bool(self.rerank_base_url)
+        return bool(self.rerank_provider and self.rerank_base_url and self.rerank_model)
+
+    @property
+    def model_id(self) -> str:
+        """Names the vectors this produces: equal ids, comparable vectors."""
+        if not self.configured:
+            return ""
+        return "|".join(
+            [
+                self.provider,
+                self.base_url.rstrip("/"),
+                self.model,
+                str(self.dimensions or ""),
+                self.query_prefix,
+                self.document_prefix,
+            ]
+        )
+
+    @classmethod
+    def from_model(cls, model: EmbeddingConfig) -> EmbeddingSettings:
+        return cls(
+            provider=(model.provider or "").strip(),
+            base_url=(model.base_url or "").strip(),
+            api_key=decrypt_secret(model.api_key_enc),
+            model=(model.model or "").strip(),
+            dimensions=model.dimensions,
+            query_prefix=model.query_prefix or "",
+            document_prefix=model.document_prefix or "",
+            timeout_seconds=model.timeout_seconds,
+            rerank_provider=(model.rerank_provider or "").strip(),
+            rerank_base_url=(model.rerank_base_url or "").strip(),
+            rerank_api_key=decrypt_secret(model.rerank_api_key_enc),
+            rerank_model=(model.rerank_model or "").strip(),
+        )
+
+
+@dataclass(slots=True, frozen=True)
+class MemorySettings:
+    """What the assistant remembers; see `app.models.MemoryConfig`."""
+
+    enabled: bool = True
+    auto_extract: bool = False
+    prompt_notes: int = 5
+    min_score: float = 0.35
+
+    @classmethod
+    def from_model(cls, model: MemoryConfig) -> MemorySettings:
+        return cls(
+            enabled=model.enabled,
+            auto_extract=model.auto_extract,
+            prompt_notes=model.prompt_notes,
+            min_score=model.min_score,
+        )
+
+
+@dataclass(slots=True, frozen=True)
 class ConfigSnapshot:
     settings: BotSettingsSnapshot
     router: Router
@@ -154,6 +241,8 @@ class ConfigSnapshot:
     access: AccessPolicy = AccessPolicy()
     llm: LLMSettings = LLMSettings()
     agent: AgentSettings = AgentSettings()
+    embedding: EmbeddingSettings = EmbeddingSettings()
+    memory: MemorySettings = MemorySettings()
 
     def integration_by_name(self, name: str) -> IntegrationSpec | None:
         folded = name.casefold()
@@ -228,6 +317,26 @@ async def ensure_agent_config(session: AsyncSession) -> AgentConfig:
     return config
 
 
+async def ensure_embedding_config(session: AsyncSession) -> EmbeddingConfig:
+    """Fetch the singleton embedding row, creating it (nothing set up) once."""
+    config = await session.get(EmbeddingConfig, EMBEDDING_CONFIG_ID)
+    if config is None:
+        config = EmbeddingConfig(id=EMBEDDING_CONFIG_ID)
+        session.add(config)
+        await session.flush()
+    return config
+
+
+async def ensure_memory_config(session: AsyncSession) -> MemoryConfig:
+    """Fetch the singleton memory row, creating it with the defaults once."""
+    config = await session.get(MemoryConfig, MEMORY_CONFIG_ID)
+    if config is None:
+        config = MemoryConfig(id=MEMORY_CONFIG_ID)
+        session.add(config)
+        await session.flush()
+    return config
+
+
 async def bump_config_version(session: AsyncSession) -> int:
     """Signal every cache that configuration changed."""
     config = await ensure_bot_config(session)
@@ -272,10 +381,14 @@ class ConfigStore:
                 config = await ensure_bot_config(session)
                 llm_config = await ensure_llm_config(session)
                 agent_config = await ensure_agent_config(session)
+                embedding_config = await ensure_embedding_config(session)
+                memory_config = await ensure_memory_config(session)
                 await session.commit()
                 await session.refresh(config)
                 await session.refresh(llm_config)
                 await session.refresh(agent_config)
+                await session.refresh(embedding_config)
+                await session.refresh(memory_config)
 
                 commands = list(
                     (await session.scalars(select(Command).order_by(Command.priority, Command.id))).all()
@@ -305,6 +418,8 @@ class ConfigStore:
                 access=AccessPolicy(mode=config.access_mode, usernames=access_usernames),
                 llm=LLMSettings.from_model(llm_config),
                 agent=AgentSettings.from_model(agent_config),
+                embedding=EmbeddingSettings.from_model(embedding_config),
+                memory=MemorySettings.from_model(memory_config),
             )
             self._snapshot = snapshot
             log.debug(

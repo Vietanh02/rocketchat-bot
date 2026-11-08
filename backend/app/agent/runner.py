@@ -1,10 +1,12 @@
 """One turn of the assistant: from a question to the model's answer.
 
 A turn waits for its conversation to be free (`queue`), loads the
-conversation (`session`), asks the model with the conversation's tools
+conversation (`session`) while recalling the notes and profile that go with
+it (`memory`, `profiles`), asks the model with the conversation's tools
 under a deadline, stores the exchange, and returns. Folding old messages
-into a summary happens afterwards, off the reply path, with the fast model
-when one is configured.
+into a summary, and picking facts to remember when that is turned on,
+happen afterwards, off the reply path, with the fast model when one is
+configured.
 
 Each turn carries a `TurnTimer`; once the reply is posted, `record` writes
 it to `agent_run` for the portal's Logs and for benchmarks.
@@ -22,14 +24,18 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.agent.memory import MemoryScopes, MemoryStore, Note, NoteError
+from app.agent.profiles import ProfileStore
 from app.agent.prompt import build_messages
 from app.agent.queue import MERGED, SessionQueue
 from app.agent.session import SessionState, SessionStore, session_key
 from app.agent.timing import TurnTimer
-from app.agent.tools import ToolRegistry
+from app.agent.tools import ToolProvider, ToolRegistry
+from app.agent.tools.memory import MemoryTools, ProfileTools
 from app.bot.llm import LLMError
 from app.bot.rcformat import strip_thinking
 from app.bot.types import MessageContext
+from app.knowledge.service import KnowledgeService
 from app.models import AgentRun, QueueMode
 
 if TYPE_CHECKING:
@@ -48,6 +54,20 @@ SUMMARY_PROMPT = (
     "decisions, facts the users stated, open questions and anything the "
     "assistant promised; drop small talk. Write at most 200 words, in the "
     "language of the conversation. Reply with the summary only."
+)
+
+EXTRACT_MAX_TOKENS = 400
+# Notes the fast model may add after one exchange.
+EXTRACT_MAX_NOTES = 3
+EXTRACT_PROMPT = (
+    "You decide what an assistant should remember from one exchange, for future "
+    "conversations. Keep only lasting facts: preferences, names, roles, decisions, "
+    "commitments, and anything the user explicitly asked to remember. Skip the "
+    "question itself, small talk, things only true today, and secrets such as "
+    "passwords or keys. Skip what the already remembered notes say. Write each note "
+    "as one short, self-contained statement in the language of the conversation, "
+    "naming who it is about. Reply with JSON only: "
+    '{"notes": ["..."]} with at most 3 notes, or {"notes": []}.'
 )
 
 Shape = Callable[..., str]
@@ -77,9 +97,16 @@ class AgentResult:
 
 
 class AgentRunner:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        knowledge: KnowledgeService | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self.knowledge = knowledge or KnowledgeService(session_factory)
         self.sessions = SessionStore(session_factory)
+        self.memory = MemoryStore(session_factory, self.knowledge)
+        self.profiles = ProfileStore(session_factory)
         self.queue = SessionQueue()
         self._background: set[asyncio.Task] = set()
         self._compacting: set[str] = set()
@@ -93,10 +120,14 @@ class AgentRunner:
         *,
         snapshot: ConfigSnapshot,
         chat: LLMChat,
-        tools: ToolRegistry | None,
+        tools: list[ToolProvider] | None,
         shape: Shape,
     ) -> AgentResult:
-        """The answer to `turn`, or `MERGED` if a later turn answered it too."""
+        """The answer to `turn`, or `MERGED` if a later turn answered it too.
+
+        `tools` are offered besides the memory and profile tools, which the
+        runner adds for the conversation's own scope.
+        """
         key, kind = session_key(turn.message, turn.thread_id)
         collect = snapshot.agent.queue_mode == QueueMode.collect.value
 
@@ -118,7 +149,7 @@ class AgentRunner:
         turns: list[AgentTurn],
         snapshot: ConfigSnapshot,
         chat: LLMChat,
-        tools: ToolRegistry | None,
+        tools: list[ToolProvider] | None,
         shape: Shape,
     ) -> AgentResult:
         turn = turns[-1]
@@ -129,20 +160,51 @@ class AgentRunner:
         question = "\n".join(t.question for t in turns)
         settings = snapshot.agent
 
-        with timer.waiting("db"):
-            state = await self.sessions.open(
-                key, kind, turn.message, idle_reset_minutes=settings.idle_reset_minutes
+        memory_on = snapshot.memory.enabled
+        scopes = MemoryScopes.for_conversation(turn.message, kind)
+        # Profiles are part of what is remembered, and private to DMs.
+        direct = memory_on and kind == "dm" and bool(turn.message.sender_id)
+        if memory_on:
+            self.memory.ensure_indexed(snapshot.embedding)
+        # The conversation, its notes and the person's profile, side by side.
+        with timer.waiting("retrieval" if memory_on else "db"):
+            state, notes, profile = await asyncio.gather(
+                self.sessions.open(
+                    key, kind, turn.message, idle_reset_minutes=settings.idle_reset_minutes
+                ),
+                self._recall(question, scopes, snapshot) if memory_on else _nothing(),
+                self.profiles.get(turn.message.sender_id) if direct else _nothing(),
             )
         timer.mark("session_loaded")
         messages = build_messages(
             chat.system_prompt,
             bot_name=snapshot.settings.bot_username or "the bot",
-            timezone_name=snapshot.settings.default_timezone,
+            timezone_name=(profile and profile.timezone) or snapshot.settings.default_timezone,
             summary=state.summary,
             history=state.history(snapshot.llm.history_messages),
             question=question,
+            profile=profile.prompt_text() if profile else "",
+            notes=[(note.id, note.text) for note in notes or ()],
         )
         timer.mark("prompt_built")
+
+        providers = list(tools or ())
+        if memory_on:
+            providers.append(
+                MemoryTools(
+                    self.memory,
+                    scopes,
+                    snapshot.embedding,
+                    actor=turn.message.sender_username,
+                    session_id=state.id,
+                    in_channel=kind != "dm",
+                )
+            )
+        if direct:
+            providers.append(
+                ProfileTools(self.profiles, turn.message.sender_id, turn.message.sender_username)
+            )
+        registry = ToolRegistry(providers)
 
         so_far = ""
         status_line = ""
@@ -174,7 +236,7 @@ class AgentRunner:
                     messages,
                     on_text=None if live is None else on_text,
                     on_event=on_event,
-                    tools=tools or None,
+                    tools=registry or None,
                     parallel_tools=settings.parallel_tools,
                     timer=timer,
                 )
@@ -195,7 +257,84 @@ class AgentRunner:
                 )
             timer.mark("persisted")
             self._maybe_compact(state, snapshot, chat)
+            if memory_on and snapshot.memory.auto_extract and status == "ok":
+                self._background_task(
+                    self._extract(question, answer, notes or [], scopes, turn, state, snapshot, chat),
+                    f"remember-{key}",
+                )
         return AgentResult(answer, status, error, state.id, chat.model, len(turns))
+
+    async def _recall(
+        self, question: str, scopes: MemoryScopes, snapshot: ConfigSnapshot
+    ) -> list[Note]:
+        try:
+            return await self.memory.recall(
+                question,
+                scopes.read,
+                embedding=snapshot.embedding,
+                limit=snapshot.memory.prompt_notes,
+                min_score=snapshot.memory.min_score,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - answer without notes rather than not at all
+            log.warning("Could not recall notes for %s", scopes.write, exc_info=True)
+            return []
+
+    def _background_task(self, coroutine, name: str) -> None:
+        task = asyncio.create_task(coroutine, name=name)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    # ----------------------------------------------------------------- #
+    # Remembering, after the reply
+    # ----------------------------------------------------------------- #
+
+    async def _extract(
+        self,
+        question: str,
+        answer: str,
+        known: list[Note],
+        scopes: MemoryScopes,
+        turn: AgentTurn,
+        state: SessionState,
+        snapshot: ConfigSnapshot,
+        chat: LLMChat,
+    ) -> None:
+        """Ask the fast model which facts of this exchange to keep, and keep them."""
+        try:
+            remembered = "\n".join(f"- {note.text}" for note in known) or "(none)"
+            raw = await chat.complete(
+                [
+                    {"role": "system", "content": EXTRACT_PROMPT},
+                    {
+                        "role": "user",
+                        "content": f"Already remembered:\n{remembered}\n\n"
+                        f"User: {question}\n\nAssistant: {answer}",
+                    },
+                ],
+                model=snapshot.agent.fast_model or None,
+                max_tokens=EXTRACT_MAX_TOKENS,
+            )
+            for note in parse_notes(strip_thinking(raw))[:EXTRACT_MAX_NOTES]:
+                try:
+                    saved, created = await self.memory.add(
+                        scopes.write,
+                        note,
+                        embedding=snapshot.embedding,
+                        source="auto",
+                        created_by=turn.message.sender_username,
+                        session_id=state.id,
+                    )
+                except NoteError as exc:
+                    log.info("Did not keep an extracted note: %s", exc)
+                    continue
+                if created:
+                    log.info("Remembered note %d in %s (extracted)", saved.id, scopes.write)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - nothing is remembered this time
+            log.warning("Could not extract notes for %s", scopes.write, exc_info=True)
 
     # ----------------------------------------------------------------- #
     # Compaction, after the reply
@@ -294,6 +433,27 @@ class AgentRunner:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         self._compacting.clear()
+        await self.memory.close()
+        await self.knowledge.aclose()
+
+
+async def _nothing() -> None:
+    return None
+
+
+def parse_notes(raw: str) -> list[str]:
+    """The notes in the fast model's JSON answer; [] if there are none or it is not JSON."""
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end <= start:
+        return []
+    try:
+        data = json.loads(raw[start : end + 1])
+    except ValueError:
+        return []
+    notes = data.get("notes") if isinstance(data, dict) else None
+    if not isinstance(notes, list):
+        return []
+    return [note.strip() for note in notes if isinstance(note, str) and note.strip()]
 
 
 def _ms(value: float | None) -> int | None:

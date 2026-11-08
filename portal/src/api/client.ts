@@ -26,6 +26,15 @@ import type {
   User,
   AgentConfig,
   AgentStats,
+  EmbeddingConfig,
+  EmbeddingConfigUpdate,
+  EmbeddingTestResult,
+  MemoryConfig,
+  MemoryNote,
+  MemoryScope,
+  MemoryStatus,
+  Profile,
+  ProfileUpdate,
 } from "./types";
 
 const TOKEN_KEY = "rcbot.portal.token";
@@ -138,6 +147,38 @@ export const api = {
   getAgent: () => get<AgentConfig>("/api/agent"),
   updateAgent: (changes: Partial<AgentConfig>) => put<AgentConfig>("/api/agent", changes),
   agentStats: (hours = 24) => get<AgentStats>(`/api/agent/stats?hours=${hours}`),
+
+  getEmbedding: () => get<EmbeddingConfig>("/api/memory/embedding"),
+  updateEmbedding: (changes: EmbeddingConfigUpdate) =>
+    put<EmbeddingConfig>("/api/memory/embedding", changes),
+  testEmbedding: (payload: EmbeddingConfigUpdate) =>
+    post<EmbeddingTestResult>("/api/memory/embedding/test", payload),
+  getMemoryConfig: () => get<MemoryConfig>("/api/memory/config"),
+  updateMemoryConfig: (changes: Partial<MemoryConfig>) =>
+    put<MemoryConfig>("/api/memory/config", changes),
+  memoryStatus: () => get<MemoryStatus>("/api/memory/status"),
+  reindexMemory: () => post<MemoryStatus>("/api/memory/reindex"),
+  listNotes: (params: { scope?: string; q?: string; offset?: number; limit?: number } = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return get<{ items: MemoryNote[]; total: number }>(`/api/memory/notes?${query}`);
+  },
+  searchNotes: (q: string, scopes: string[]) => {
+    const query = new URLSearchParams({ q });
+    for (const scope of scopes) query.append("scope", scope);
+    return get<MemoryNote[]>(`/api/memory/search?${query}`);
+  },
+  memoryScopes: () => get<MemoryScope[]>("/api/memory/scopes"),
+  addNote: (scope: string, text: string) => post<MemoryNote>("/api/memory/notes", { scope, text }),
+  updateNote: (id: number, text: string) => put<MemoryNote>(`/api/memory/notes/${id}`, { text }),
+  deleteNote: (id: number) => del(`/api/memory/notes/${id}`),
+  forgetScope: (scope: string) => del(`/api/memory/scopes/${encodeURIComponent(scope)}`),
+  listProfiles: () => get<Profile[]>("/api/memory/profiles"),
+  updateProfile: (rcUserId: string, changes: ProfileUpdate) =>
+    put<Profile>(`/api/memory/profiles/${encodeURIComponent(rcUserId)}`, changes),
+  deleteProfile: (rcUserId: string) => del(`/api/memory/profiles/${encodeURIComponent(rcUserId)}`),
 
   listAccess: () => get<AccessEntry[]>("/api/access"),
   addAccess: (usernames: string, note = "") =>

@@ -506,7 +506,19 @@ async def weather_api(app_env, monkeypatch):
     return calls
 
 
+async def without_memory(runtime) -> None:
+    """Turn memory off, so only integrations are offered as tools."""
+    from app.bot.config_store import ensure_memory_config
+
+    async with runtime.session_factory() as session:
+        (await ensure_memory_config(session)).enabled = False
+        (await session.get(BotConfig, 1)).config_version += 1
+        await session.commit()
+    runtime.config_store.invalidate()
+
+
 async def test_only_integrations_marked_as_tools_are_offered(app_env, gateway, model, weather_api):
+    await without_memory(app_env)
     await app_env.bot.responder.respond(context("hello"))
 
     tools = model.requests[0]["tools"]
@@ -515,6 +527,7 @@ async def test_only_integrations_marked_as_tools_are_offered(app_env, gateway, m
 
 
 async def test_no_tools_are_sent_when_none_are_marked(app_env, gateway, model):
+    await without_memory(app_env)
     await app_env.bot.responder.respond(context("hello"))
     assert "tools" not in model.requests[0]
 

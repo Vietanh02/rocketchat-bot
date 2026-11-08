@@ -17,7 +17,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # Kinds of waiting that are not this process's own work.
-WAIT_KINDS = ("llm", "tools", "rc", "db")
+# "retrieval" is loading the conversation together with recalling notes
+# (embedding the question, searching Qdrant and SQLite), which overlap.
+WAIT_KINDS = ("llm", "tools", "rc", "db", "retrieval")
 
 
 @dataclass(slots=True)

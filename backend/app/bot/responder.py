@@ -21,7 +21,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.agent.queue import MERGED, QueueFull
 from app.agent.runner import AgentResult, AgentRunner, AgentTurn
 from app.agent.timing import TurnTimer
-from app.agent.tools import ToolRegistry
 from app.agent.tools.integrations import IntegrationTools
 from app.bot.builtins import BuiltinContext, get_builtin
 from app.bot.config_store import ConfigSnapshot, ConfigStore
@@ -284,14 +283,12 @@ class RuleResponder:
                 message, f":warning: {error}", snapshot, timer, None, ack, error=error
             )
 
-        tools = ToolRegistry(
-            [
-                IntegrationTools(
-                    (spec for spec in snapshot.integrations.values() if spec.llm_tool),
-                    message.template_vars(),
-                )
-            ]
-        )
+        tools = [
+            IntegrationTools(
+                (spec for spec in snapshot.integrations.values() if spec.llm_tool),
+                message.template_vars(),
+            )
+        ]
         if snapshot.llm.format_for_rocketchat:
             shape = to_rocketchat
         else:

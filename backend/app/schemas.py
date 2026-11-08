@@ -603,3 +603,148 @@ class AgentStatsOut(BaseModel):
     total_ms: Percentiles
     overhead_ms: Percentiles
     recent: list[AgentRunOut]
+
+
+# --------------------------------------------------------------------------- #
+# Vector search, memory and profiles
+# --------------------------------------------------------------------------- #
+
+
+class EmbeddingConfigOut(BaseModel):
+    provider: Literal["", "openai", "tei"]
+    base_url: str
+    model: str
+    dimensions: int | None
+    query_prefix: str
+    document_prefix: str
+    timeout_seconds: float
+    has_api_key: bool
+    rerank_provider: Literal["", "tei", "cohere"]
+    rerank_base_url: str
+    rerank_model: str
+    has_rerank_api_key: bool
+    configured: bool
+    rerank_configured: bool
+    # Whether APP_QDRANT_URL is set; vectors are only searched when it is.
+    vector_db_configured: bool
+
+
+class EmbeddingConfigUpdate(BaseModel):
+    provider: Literal["", "openai", "tei"] | None = None
+    base_url: str | None = Field(default=None, max_length=512)
+    # Write-only. "" clears the stored key; omit to leave it unchanged.
+    api_key: str | None = Field(default=None, max_length=4096)
+    model: str | None = Field(default=None, max_length=256)
+    # null takes the model's own size.
+    dimensions: int | None = Field(default=None, ge=8, le=8192)
+    query_prefix: str | None = Field(default=None, max_length=64)
+    document_prefix: str | None = Field(default=None, max_length=64)
+    timeout_seconds: float | None = Field(default=None, ge=1, le=300)
+    rerank_provider: Literal["", "tei", "cohere"] | None = None
+    rerank_base_url: str | None = Field(default=None, max_length=512)
+    rerank_api_key: str | None = Field(default=None, max_length=4096)
+    rerank_model: str | None = Field(default=None, max_length=256)
+
+    _urls = field_validator("base_url", "rerank_base_url")(
+        classmethod(lambda cls, v: _gateway_url(v))
+    )
+
+    @field_validator("model", "rerank_model")
+    @classmethod
+    def _strip(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
+
+
+class EmbeddingTestResult(BaseModel):
+    ok: bool
+    message: str
+    dimensions: int | None = None
+    embed_ms: int | None = None
+    # Present when a reranker is set up.
+    rerank_ok: bool | None = None
+    rerank_message: str | None = None
+    rerank_ms: int | None = None
+
+
+class MemoryConfigOut(BaseModel):
+    enabled: bool
+    auto_extract: bool
+    prompt_notes: int
+    min_score: float
+
+
+class MemoryConfigUpdate(BaseModel):
+    enabled: bool | None = None
+    auto_extract: bool | None = None
+    prompt_notes: int | None = Field(default=None, ge=0, le=30)
+    min_score: float | None = Field(default=None, ge=0, le=1)
+
+
+class VectorDbStatus(BaseModel):
+    configured: bool
+    reachable: bool = False
+    version: str | None = None
+    error: str | None = None
+    # Vectors in the memory collection; None if it does not exist yet.
+    memory_vectors: int | None = None
+
+
+class MemoryStatusOut(BaseModel):
+    vector_db: VectorDbStatus
+    embedding_configured: bool
+    notes: int
+    # Notes with no vector of the current model yet.
+    pending: int
+    # Searches use words only when this is false.
+    semantic: bool
+
+
+class MemoryNoteOut(BaseModel):
+    id: int
+    scope: str
+    text: str
+    source: str
+    created_by: str | None
+    created_at: datetime | None
+    score: float | None = None
+
+
+class MemoryNoteList(BaseModel):
+    items: list[MemoryNoteOut]
+    total: int
+
+
+class MemoryScopeOut(BaseModel):
+    scope: str
+    count: int
+    # A person's username or "everyone", when known.
+    label: str
+
+
+class MemoryNoteCreate(BaseModel):
+    # "global", "user:<rc user id>" or "room:<room id>".
+    scope: str = Field(min_length=1, max_length=160, pattern=r"^(global|user:[\w-]+|room:[\w-]+)$")
+    text: str = Field(min_length=1, max_length=1000)
+
+
+class MemoryNoteUpdate(BaseModel):
+    text: str = Field(min_length=1, max_length=1000)
+
+
+class ProfileOut(BaseModel):
+    rc_user_id: str
+    username: str
+    display_name: str
+    language: str
+    timezone: str
+    about: str
+    notes: int = 0
+    updated_at: datetime | None = None
+
+
+class ProfileUpdate(BaseModel):
+    username: str | None = Field(default=None, max_length=128)
+    display_name: str | None = Field(default=None, max_length=128)
+    language: str | None = Field(default=None, max_length=64)
+    timezone: str | None = Field(default=None, max_length=64)
+    about: str | None = Field(default=None, max_length=1000)

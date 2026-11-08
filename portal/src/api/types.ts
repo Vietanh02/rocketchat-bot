@@ -338,3 +338,103 @@ export interface AgentStats {
   overhead_ms: Percentiles;
   recent: AgentRun[];
 }
+
+// ------------------------------------------------------------------------- //
+// Memory, vector search and profiles
+// ------------------------------------------------------------------------- //
+
+export type EmbeddingProvider = "" | "openai" | "tei";
+export type RerankProvider = "" | "tei" | "cohere";
+
+export interface EmbeddingConfig {
+  provider: EmbeddingProvider;
+  base_url: string;
+  model: string;
+  dimensions: number | null;
+  query_prefix: string;
+  document_prefix: string;
+  timeout_seconds: number;
+  has_api_key: boolean;
+  rerank_provider: RerankProvider;
+  rerank_base_url: string;
+  rerank_model: string;
+  has_rerank_api_key: boolean;
+  configured: boolean;
+  rerank_configured: boolean;
+  vector_db_configured: boolean;
+}
+
+export interface EmbeddingConfigUpdate {
+  provider?: EmbeddingProvider;
+  base_url?: string;
+  api_key?: string;
+  model?: string;
+  dimensions?: number | null;
+  query_prefix?: string;
+  document_prefix?: string;
+  timeout_seconds?: number;
+  rerank_provider?: RerankProvider;
+  rerank_base_url?: string;
+  rerank_api_key?: string;
+  rerank_model?: string;
+}
+
+export interface EmbeddingTestResult {
+  ok: boolean;
+  message: string;
+  dimensions: number | null;
+  embed_ms: number | null;
+  rerank_ok: boolean | null;
+  rerank_message: string | null;
+  rerank_ms: number | null;
+}
+
+export interface MemoryConfig {
+  enabled: boolean;
+  auto_extract: boolean;
+  prompt_notes: number;
+  min_score: number;
+}
+
+export interface MemoryStatus {
+  vector_db: {
+    configured: boolean;
+    reachable: boolean;
+    version: string | null;
+    error: string | null;
+    memory_vectors: number | null;
+  };
+  embedding_configured: boolean;
+  notes: number;
+  pending: number;
+  semantic: boolean;
+}
+
+export interface MemoryNote {
+  id: number;
+  scope: string;
+  text: string;
+  source: "tool" | "auto" | "portal" | string;
+  created_by: string | null;
+  created_at: string | null;
+  score: number | null;
+}
+
+export interface MemoryScope {
+  scope: string;
+  count: number;
+  label: string;
+}
+
+export interface Profile {
+  rc_user_id: string;
+  username: string;
+  display_name: string;
+  language: string;
+  timezone: string;
+  about: string;
+  notes: number;
+  updated_at: string | null;
+}
+
+export type ProfileUpdate = Partial<Omit<Profile, "rc_user_id" | "notes" | "updated_at">>;

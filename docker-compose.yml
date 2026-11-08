@@ -21,6 +21,9 @@ services:
       APP_RC_WS_URL: ${APP_RC_WS_URL:-ws://rocketchat:3000/websocket}
       APP_CORS_ORIGINS: ${APP_CORS_ORIGINS:-http://localhost:8080}
       APP_SCRIPTS_DIR: /app/scripts
+      APP_QDRANT_URL: ${APP_QDRANT_URL:-http://qdrant:6333}
+    depends_on:
+      - qdrant
     volumes:
       - bot_data:/app/data
       # Script commands. Read-only: the bot runs these files, never writes them.
@@ -31,6 +34,39 @@ services:
       - rocketchat
     expose:
       - "8000"
+
+  # Vectors for the assistant's memory (and later its knowledge base).
+  # Reached only by the backend, on the internal network.
+  qdrant:
+    image: qdrant/qdrant:v1.19.2
+    restart: unless-stopped
+    mem_limit: 512m
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - botnet
+    expose:
+      - "6333"
+
+  # Optional local embedding server, off by default; needs about 0.5 GB of RAM:
+  #   docker compose --profile local-embed up -d
+  # then in the portal: provider "tei", URL http://embed:80, prefixes
+  # "query: " and "passage: ". It is on the private network, so the backend
+  # needs APP_ALLOW_PRIVATE_INTEGRATION_HOSTS=true to call it.
+  embed:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8.3
+    profiles: ["local-embed"]
+    restart: unless-stopped
+    mem_limit: 768m
+    command: ["--model-id", "intfloat/multilingual-e5-small", "--max-batch-tokens", "8192"]
+    volumes:
+      - embed_models:/data
+    networks:
+      - botnet
+    expose:
+      - "80"
 
   portal:
     build: ./portal
@@ -44,6 +80,8 @@ services:
 
 volumes:
   bot_data:
+  qdrant_data:
+  embed_models:
 
 networks:
   botnet:

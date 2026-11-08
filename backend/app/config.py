@@ -61,6 +61,14 @@ class Settings(BaseSettings):
     # Earlier messages (questions and answers) sent along with each question.
     llm_history_messages: int = Field(default=10, ge=0, le=100)
 
+    # Vector database (Qdrant, REST port). Empty: memory and knowledge are
+    # found by their words only. The embedding model is set in the portal.
+    qdrant_url: str = ""
+    qdrant_api_key: str = ""
+    # Put before every collection name, so several bots can share a Qdrant.
+    qdrant_collection_prefix: str = "rcbot_"
+    qdrant_timeout_seconds: float = Field(default=10.0, gt=0)
+
     # Bot runtime
     bot_enabled: bool = True
     inbound_queue_size: int = 500
