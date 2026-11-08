@@ -539,3 +539,67 @@ class DashboardStats(BaseModel):
     connection: ConnectionStatusOut
     recent_messages: list[MessageLogOut] = Field(default_factory=list)
     upcoming_tasks: list[TaskOut] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# Assistant (agent) settings and timings
+# --------------------------------------------------------------------------- #
+
+
+class AgentConfigOut(BaseModel):
+    ack_reaction: str
+    fast_model: str
+    turn_deadline_seconds: float
+    queue_mode: Literal["followup", "collect"]
+    idle_reset_minutes: int
+    summarize_after_messages: int
+    parallel_tools: bool
+
+
+class AgentConfigUpdate(BaseModel):
+    # An emoji shortcode such as ":eyes:"; "" for none.
+    ack_reaction: str | None = Field(default=None, max_length=64, pattern=r"^(:[\w+-]+:)?$")
+    fast_model: str | None = Field(default=None, max_length=256)
+    turn_deadline_seconds: float | None = Field(default=None, ge=5, le=600)
+    queue_mode: Literal["followup", "collect"] | None = None
+    idle_reset_minutes: int | None = Field(default=None, ge=0, le=60 * 24 * 30)
+    summarize_after_messages: int | None = Field(default=None, ge=0, le=1000)
+    parallel_tools: bool | None = None
+
+    @field_validator("ack_reaction", "fast_model")
+    @classmethod
+    def _strip(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
+
+
+class Percentiles(BaseModel):
+    p50: float | None = None
+    p95: float | None = None
+    max: float | None = None
+
+
+class AgentRunOut(BaseModel):
+    id: int
+    started_at: datetime
+    trigger: str
+    status: str
+    model: str
+    rounds: int
+    tools: list[dict[str, Any]]
+    ack_ms: int | None
+    ttft_ms: int | None
+    total_ms: int | None
+    overhead_ms: float | None
+    error: str | None
+
+
+class AgentStatsOut(BaseModel):
+    runs: int
+    since: datetime | None
+    errors: int
+    timeouts: int
+    ack_ms: Percentiles
+    ttft_ms: Percentiles
+    total_ms: Percentiles
+    overhead_ms: Percentiles
+    recent: list[AgentRunOut]

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -21,6 +22,7 @@ from app.bot.router import Router
 from app.config import Settings, get_settings
 from app.integrations.executor import IntegrationSpec
 from app.models import (
+    AgentConfig,
     BotAccessEntry,
     BotConfig,
     Command,
@@ -34,6 +36,9 @@ log = logging.getLogger(__name__)
 
 BOT_CONFIG_ID = 1
 LLM_CONFIG_ID = 1
+AGENT_CONFIG_ID = 1
+# How long a snapshot is used before its version is compared with the database.
+VERSION_CHECK_SECONDS = 1.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -117,12 +122,38 @@ class LLMSettings:
 
 
 @dataclass(slots=True, frozen=True)
+class AgentSettings:
+    """How conversations are run; see `app.models.AgentConfig`."""
+
+    ack_reaction: str = ":eyes:"
+    fast_model: str = ""
+    turn_deadline_seconds: float = 60.0
+    queue_mode: str = "followup"
+    idle_reset_minutes: int = 0
+    summarize_after_messages: int = 40
+    parallel_tools: bool = True
+
+    @classmethod
+    def from_model(cls, model: AgentConfig) -> AgentSettings:
+        return cls(
+            ack_reaction=(model.ack_reaction or "").strip(),
+            fast_model=(model.fast_model or "").strip(),
+            turn_deadline_seconds=model.turn_deadline_seconds,
+            queue_mode=model.queue_mode,
+            idle_reset_minutes=model.idle_reset_minutes,
+            summarize_after_messages=model.summarize_after_messages,
+            parallel_tools=model.parallel_tools,
+        )
+
+
+@dataclass(slots=True, frozen=True)
 class ConfigSnapshot:
     settings: BotSettingsSnapshot
     router: Router
     integrations: dict[int, IntegrationSpec]
     access: AccessPolicy = AccessPolicy()
     llm: LLMSettings = LLMSettings()
+    agent: AgentSettings = AgentSettings()
 
     def integration_by_name(self, name: str) -> IntegrationSpec | None:
         folded = name.casefold()
@@ -187,6 +218,16 @@ async def ensure_llm_config(
     return config
 
 
+async def ensure_agent_config(session: AsyncSession) -> AgentConfig:
+    """Fetch the singleton agent row, creating it with the defaults once."""
+    config = await session.get(AgentConfig, AGENT_CONFIG_ID)
+    if config is None:
+        config = AgentConfig(id=AGENT_CONFIG_ID)
+        session.add(config)
+        await session.flush()
+    return config
+
+
 async def bump_config_version(session: AsyncSession) -> int:
     """Signal every cache that configuration changed."""
     config = await ensure_bot_config(session)
@@ -202,16 +243,26 @@ class ConfigStore:
         self._session_factory = session_factory
         self._snapshot: ConfigSnapshot | None = None
         self._lock = asyncio.Lock()
+        # time.monotonic() until which the cached version is trusted unread.
+        self._checked_until = 0.0
 
     async def current(self) -> ConfigSnapshot:
-        """Return the cached snapshot, reloading if the DB version moved on."""
+        """Return the cached snapshot, reloading if the DB version moved on.
+
+        Portal writes call `invalidate`, so the version is read back at most
+        every VERSION_CHECK_SECONDS, as a safety net, not on every message.
+        """
         cached = self._snapshot
         if cached is not None:
+            now = time.monotonic()
+            if now < self._checked_until:
+                return cached
             async with self._session_factory() as session:
                 version = await session.scalar(
                     select(BotConfig.config_version).where(BotConfig.id == BOT_CONFIG_ID)
                 )
             if version == cached.settings.config_version:
+                self._checked_until = now + VERSION_CHECK_SECONDS
                 return cached
         return await self.reload()
 
@@ -220,9 +271,11 @@ class ConfigStore:
             async with self._session_factory() as session:
                 config = await ensure_bot_config(session)
                 llm_config = await ensure_llm_config(session)
+                agent_config = await ensure_agent_config(session)
                 await session.commit()
                 await session.refresh(config)
                 await session.refresh(llm_config)
+                await session.refresh(agent_config)
 
                 commands = list(
                     (await session.scalars(select(Command).order_by(Command.priority, Command.id))).all()
@@ -251,6 +304,7 @@ class ConfigStore:
                 },
                 access=AccessPolicy(mode=config.access_mode, usernames=access_usernames),
                 llm=LLMSettings.from_model(llm_config),
+                agent=AgentSettings.from_model(agent_config),
             )
             self._snapshot = snapshot
             log.debug(
@@ -263,3 +317,4 @@ class ConfigStore:
 
     def invalidate(self) -> None:
         self._snapshot = None
+        self._checked_until = 0.0

@@ -10,15 +10,22 @@ while it streams in and once it is complete.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.agent.queue import MERGED, QueueFull
+from app.agent.runner import AgentResult, AgentRunner, AgentTurn
+from app.agent.timing import TurnTimer
+from app.agent.tools import ToolRegistry
+from app.agent.tools.integrations import IntegrationTools
 from app.bot.builtins import BuiltinContext, get_builtin
 from app.bot.config_store import ConfigSnapshot, ConfigStore
-from app.bot.llm import LLMChat, LLMError, LLMService, Toolbox
+from app.bot.llm import LLMChat, LLMService
 from app.bot.rcformat import strip_thinking, to_rocketchat
 from app.bot.router import MatchResult
 from app.bot.scripts import ScriptError, clip_output, result_to_reply, run_script
@@ -38,6 +45,10 @@ from app.scheduler.service import SchedulerService
 log = logging.getLogger(__name__)
 
 GatewayProvider = Callable[[], Gateway | None]
+
+# A gateway URL that passed the private-host check is trusted this long, so
+# answering does not resolve the host's DNS on every message.
+GATEWAY_CHECK_TTL_SECONDS = 300.0
 
 
 class Responder(Protocol):
@@ -61,6 +72,9 @@ class RuleResponder:
         self._scheduler = scheduler
         # Configured in the portal; "llm" mode falls back to rules until it is.
         self.llm = llm
+        self.agent = AgentRunner(session_factory)
+        self._gateway_checked: dict[str, float] = {}
+        self._background: set[asyncio.Task] = set()
 
     async def respond(self, message: MessageContext, *, live: bool = True) -> Reply | None:
         """`live=False` never posts while answering, as when the portal tests a command."""
@@ -82,7 +96,11 @@ class RuleResponder:
                 if not (message.is_direct or message.mentioned_bot):
                     return None
                 return await self._with_live(
-                    message, snapshot, live, lambda lr: self._ask_llm(message, snapshot, lr, chat)
+                    message,
+                    snapshot,
+                    live,
+                    lambda lr: self._ask_llm(message, snapshot, lr, chat, post=live),
+                    follow=True,
                 )
             return self._fallback(message, snapshot)
 
@@ -98,9 +116,15 @@ class RuleResponder:
         snapshot: ConfigSnapshot,
         live: bool,
         answer: Callable[[LiveReply | None], Awaitable[Reply | None]],
+        *,
+        follow: bool = False,
     ) -> Reply | None:
-        """Run `answer`, showing its output as it arrives when streaming is on."""
-        live_reply = self._live_reply(message, snapshot) if live else None
+        """Run `answer`, showing its output as it arrives when streaming is on.
+
+        `follow` shows the output as fast as it comes (a model's answer)
+        instead of typing it out at the configured pace (a script's output).
+        """
+        live_reply = self._live_reply(message, snapshot, follow=follow) if live else None
         try:
             reply = await answer(live_reply)
         except BaseException:
@@ -151,6 +175,17 @@ class RuleResponder:
 
     # ----------------------------------------------------------------- #
 
+    def goes_to_model(self, message: MessageContext, snapshot: ConfigSnapshot) -> bool:
+        """Whether `message` would be answered by the model rather than a command."""
+        return (
+            snapshot.settings.enabled
+            and self._llm_chat(snapshot) is not None
+            and (message.is_direct or message.mentioned_bot)
+            and self._should_consider(message, snapshot)
+            and snapshot.access.allows(message.sender_username)
+            and snapshot.router.match(message.clean_text or message.text) is None
+        )
+
     def _llm_chat(self, snapshot: ConfigSnapshot) -> LLMChat | None:
         """The model to ask about unmatched messages, if "llm" mode is on."""
         if snapshot.settings.responder_mode != ResponderMode.llm.value or self.llm is None:
@@ -184,7 +219,7 @@ class RuleResponder:
         return Reply(text="", denied=True)
 
     def _live_reply(
-        self, message: MessageContext, snapshot: ConfigSnapshot
+        self, message: MessageContext, snapshot: ConfigSnapshot, *, follow: bool = False
     ) -> LiveReply | None:
         options = DeliveryOptions.from_settings(snapshot.settings)
         gateway = self._gateway_provider()
@@ -195,6 +230,7 @@ class RuleResponder:
             message.room_id,
             thread_id=self._thread_for(message, snapshot),
             options=options,
+            follow=follow,
         )
 
     def _thread_for(self, message: MessageContext, snapshot: ConfigSnapshot) -> str | None:
@@ -226,32 +262,35 @@ class RuleResponder:
         snapshot: ConfigSnapshot,
         live: LiveReply | None,
         chat: LLMChat,
+        *,
+        post: bool = True,
     ) -> Reply | None:
-        assert self.llm is not None
         question = message.clean_text or message.text
         if not question.strip():
             return None
+        timer = TurnTimer(started=message.arrived)
+        # Show at once that the bot is on it; the answer takes seconds.
+        ack = self._ack(message, snapshot, timer) if post else None
         if not message.is_direct and message.sender_username:
             # Several people share a channel's conversation; say who is talking.
             question = f"@{message.sender_username}: {question}"
         try:
             # Same guard as integrations: no probing the host's private network.
-            await assert_url_allowed(snapshot.llm.base_url)
+            await self._check_gateway(snapshot.llm.base_url)
         except IntegrationError as exc:
             error = f"the language model gateway is not allowed: {exc}"
             log.warning("LLM reply refused: %s", error)
-            return self._reply(message, f":warning: {error}", None, snapshot, error=error)
+            return self._model_reply(
+                message, f":warning: {error}", snapshot, timer, None, ack, error=error
+            )
 
-        memory = self.llm.memory
-        key = (message.room_id, self._thread_for(message, snapshot))
-        messages = chat.build_messages(
-            question,
-            memory.history(key),
-            bot_name=snapshot.settings.bot_username or "the bot",
-        )
-        tools = Toolbox(
-            (spec for spec in snapshot.integrations.values() if spec.llm_tool),
-            message.template_vars(),
+        tools = ToolRegistry(
+            [
+                IntegrationTools(
+                    (spec for spec in snapshot.integrations.values() if spec.llm_tool),
+                    message.template_vars(),
+                )
+            ]
         )
         if snapshot.llm.format_for_rocketchat:
             shape = to_rocketchat
@@ -259,22 +298,132 @@ class RuleResponder:
             def shape(text: str, *, partial: bool = False) -> str:
                 return strip_thinking(text, partial=partial)
 
+        turn = AgentTurn(message, question, self._thread_for(message, snapshot), timer, live)
         try:
-            raw = await chat.complete(
-                messages,
-                on_text=None if live is None else lambda so_far: live.push(shape(so_far, partial=True)),
-                tools=tools or None,
+            result = await self.agent.answer(
+                turn, snapshot=snapshot, chat=chat, tools=tools, shape=shape
             )
-        except LLMError as exc:
-            log.info("LLM reply failed: %s", exc)
-            return self._reply(message, f":warning: {exc}", None, snapshot, error=str(exc))
-        text = shape(raw).strip()
+        except QueueFull:
+            error = "too many messages are waiting in this conversation; try again shortly"
+            return self._model_reply(
+                message, f":warning: {error}", snapshot, timer, None, ack, error=error
+            )
+        if live is not None and live.first_posted_at is not None:
+            timer.mark_at("first_visible", live.first_posted_at)
+        if result is MERGED:
+            # Answered together with a later message.
+            self._finish_turn(message, snapshot, timer, None, ack, sent=False)
+            return None
+        if result.status == "error":
+            error = result.error or "the language model call failed"
+            return self._model_reply(
+                message, f":warning: {error}", snapshot, timer, result, ack, error=error
+            )
+
+        text = shape(result.text).strip()
+        if result.status == "timeout":
+            note = f":hourglass: _{result.error}; this is as far as I got._"
+            if not text:
+                error = f"the language model gave no answer before it was {result.error}"
+                return self._model_reply(
+                    message, f":warning: {error}", snapshot, timer, result, ack, error=error
+                )
+            return self._model_reply(message, f"{text}\n\n{note}", snapshot, timer, result, ack)
         if not text:
             error = "the language model returned an empty answer"
-            return self._reply(message, f":warning: {error}", None, snapshot, error=error)
-        # The model's own words, so it keeps writing standard Markdown.
-        memory.remember(key, question, strip_thinking(raw).strip())
-        return self._reply(message, text, None, snapshot)
+            return self._model_reply(
+                message, f":warning: {error}", snapshot, timer, result, ack, error=error
+            )
+        return self._model_reply(message, text, snapshot, timer, result, ack)
+
+    async def _check_gateway(self, base_url: str) -> None:
+        now = time.monotonic()
+        if self._gateway_checked.get(base_url, 0.0) > now:
+            return
+        await assert_url_allowed(base_url)
+        self._gateway_checked = {base_url: now + GATEWAY_CHECK_TTL_SECONDS}
+
+    def _ack(
+        self, message: MessageContext, snapshot: ConfigSnapshot, timer: TurnTimer
+    ) -> asyncio.Task | None:
+        """Put the acknowledgement reaction on `message`, without waiting for it."""
+        emoji = snapshot.agent.ack_reaction
+        gateway = self._gateway_provider()
+        if not emoji or gateway is None or not message.message_id:
+            return None
+
+        async def react() -> bool:
+            try:
+                await gateway.react(message.message_id, emoji)
+            except Exception as exc:  # noqa: BLE001 - only a courtesy
+                log.debug("Could not react to %s: %s", message.message_id, exc)
+                return False
+            timer.mark("ack")
+            return True
+
+        return self._spawn(react())
+
+    def _spawn(self, coro: Awaitable) -> asyncio.Task:
+        task = asyncio.ensure_future(coro)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+        return task
+
+    def _model_reply(
+        self,
+        message: MessageContext,
+        text: str,
+        snapshot: ConfigSnapshot,
+        timer: TurnTimer,
+        result: AgentResult | None,
+        ack: asyncio.Task | None,
+        *,
+        error: str | None = None,
+    ) -> Reply:
+        reply = self._reply(message, text, None, snapshot, error=error)
+        reply.timer = timer
+
+        async def on_sent(sent: bool) -> None:
+            self._finish_turn(message, snapshot, timer, result, ack, sent=sent, error=error)
+
+        reply.on_sent = on_sent
+        return reply
+
+    def _finish_turn(
+        self,
+        message: MessageContext,
+        snapshot: ConfigSnapshot,
+        timer: TurnTimer,
+        result: AgentResult | None,
+        ack: asyncio.Task | None,
+        *,
+        sent: bool,
+        error: str | None = None,
+    ) -> None:
+        """After the reply: take the reaction off and record the timings."""
+        timer.finish()
+        gateway = self._gateway_provider()
+        emoji = snapshot.agent.ack_reaction
+
+        async def wrap_up() -> None:
+            if ack is not None and await ack and gateway is not None:
+                try:
+                    await gateway.react(message.message_id, emoji, on=False)
+                except Exception as exc:  # noqa: BLE001 - only a courtesy
+                    log.debug("Could not remove the reaction from %s: %s", message.message_id, exc)
+            if result is None and error is None:
+                await self.agent.record(timer, None, status="merged")
+            else:
+                await self.agent.record(
+                    timer, result, error=error or (None if sent else "the reply could not be posted")
+                )
+
+        self._spawn(wrap_up())
+
+    async def aclose(self) -> None:
+        await self.agent.close()
+        for task in list(self._background):
+            task.cancel()
 
     async def _render(
         self,
@@ -300,6 +449,7 @@ class RuleResponder:
                     session_factory=self._session_factory,
                     gateway=self._gateway_provider(),
                     scheduler=self._scheduler,
+                    agent=self.agent,
                 )
             )
 

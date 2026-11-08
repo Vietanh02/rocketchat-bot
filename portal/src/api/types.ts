@@ -293,3 +293,48 @@ export interface DashboardStats {
   recent_messages: MessageLogEntry[];
   upcoming_tasks: Task[];
 }
+
+export type QueueMode = "followup" | "collect";
+
+export interface AgentConfig {
+  ack_reaction: string;
+  fast_model: string;
+  turn_deadline_seconds: number;
+  queue_mode: QueueMode;
+  idle_reset_minutes: number;
+  summarize_after_messages: number;
+  parallel_tools: boolean;
+}
+
+export interface Percentiles {
+  p50: number | null;
+  p95: number | null;
+  max: number | null;
+}
+
+export interface AgentRun {
+  id: number;
+  started_at: string;
+  trigger: string;
+  status: string;
+  model: string;
+  rounds: number;
+  tools: { name: string; ms: number; ok: boolean }[];
+  ack_ms: number | null;
+  ttft_ms: number | null;
+  total_ms: number | null;
+  overhead_ms: number | null;
+  error: string | null;
+}
+
+export interface AgentStats {
+  runs: number;
+  since: string | null;
+  errors: number;
+  timeouts: number;
+  ack_ms: Percentiles;
+  ttft_ms: Percentiles;
+  total_ms: Percentiles;
+  overhead_ms: Percentiles;
+  recent: AgentRun[];
+}

@@ -56,4 +56,7 @@ if settings.database_url.startswith("sqlite"):
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA busy_timeout=5000")
+        # With WAL this cannot corrupt the database; a power cut may lose the
+        # last commits, in exchange for not syncing the disk on every one.
+        cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.close()

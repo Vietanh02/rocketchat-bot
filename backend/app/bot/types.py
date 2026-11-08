@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from app.rocketchat.ddp import IncomingMessage
 
 if TYPE_CHECKING:
+    from app.agent.timing import TurnTimer
     from app.bot.streaming import LiveReply
 
 
@@ -27,6 +30,8 @@ class MessageContext:
     clean_text: str = ""
     received_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     mentioned_bot: bool = False
+    # time.monotonic() when the bot received it.
+    arrived: float = field(default_factory=time.monotonic)
 
     @property
     def is_direct(self) -> bool:
@@ -48,6 +53,7 @@ class MessageContext:
             thread_id=message.thread_id,
             clean_text=clean,
             mentioned_bot=mentioned,
+            arrived=message.arrived,
         )
 
     def template_vars(self) -> dict[str, Any]:
@@ -98,3 +104,7 @@ class Reply:
     denied: bool = False
     # Already on screen while it was produced; sending finishes this message.
     live: LiveReply | None = None
+    # Timings of a model turn; the runner adds how long sending took.
+    timer: TurnTimer | None = None
+    # Called once the reply is posted (or failed to post), off the reply path.
+    on_sent: Callable[[bool], Awaitable[None]] | None = None

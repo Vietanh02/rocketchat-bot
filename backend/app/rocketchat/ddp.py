@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 import logging
 import random
 import uuid
@@ -46,6 +47,8 @@ class IncomingMessage:
     is_system: bool = False
     is_bot: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
+    # time.monotonic() when it was read off the socket, to time the reply.
+    arrived: float = field(default_factory=time.monotonic)
 
 
 MessageHandler = Callable[[IncomingMessage], Awaitable[None]]

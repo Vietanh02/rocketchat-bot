@@ -20,13 +20,13 @@ from app.bot.config_store import ConfigSnapshot
 from app.bot.remind_parser import RemindParseError, parse_reminder
 from app.bot.router import MatchResult
 from app.bot.types import MessageContext
-from app.config import get_settings
 from app.models import ResponderMode, ScheduledTask
 from app.rocketchat.gateway import Gateway
 from app.scheduler.triggers import ScheduleError, describe
 from app.timeutil import format_local, to_utc
 
 if TYPE_CHECKING:  # avoid a circular import at runtime
+    from app.agent.runner import AgentRunner
     from app.scheduler.service import SchedulerService
 
 log = logging.getLogger(__name__)
@@ -42,6 +42,7 @@ class BuiltinContext:
     session_factory: async_sessionmaker[AsyncSession]
     gateway: Gateway | None = None
     scheduler: SchedulerService | None = None
+    agent: AgentRunner | None = None
 
 
 BuiltinHandler = Callable[[BuiltinContext], Awaitable[str]]
@@ -107,7 +108,7 @@ async def status_command(ctx: BuiltinContext) -> str:
     )
     responder = f"`{settings.responder_mode}`"
     if settings.responder_mode == ResponderMode.llm.value:
-        responder += f" ({get_settings().llm_model or 'no model configured'})"
+        responder += f" ({ctx.snapshot.llm.model or 'no model configured'})"
     return "\n".join(
         [
             "**Bot status**",
@@ -119,6 +120,20 @@ async def status_command(ctx: BuiltinContext) -> str:
             f"- server time: {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC",
         ]
     )
+
+
+# --------------------------------------------------------------------------- #
+# new
+# --------------------------------------------------------------------------- #
+
+
+@builtin("new")
+async def new_command(ctx: BuiltinContext) -> str:
+    """Forget the conversation so far (this DM, channel or thread)."""
+    if ctx.agent is None:
+        return "There is no conversation to start afresh."
+    await ctx.agent.reset(ctx.message, ctx.message.thread_id)
+    return "Started a new conversation. I have forgotten what we said before."
 
 
 # --------------------------------------------------------------------------- #

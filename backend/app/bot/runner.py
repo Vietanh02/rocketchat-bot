@@ -319,17 +319,26 @@ class BotService:
             log.exception("Responder failed for %s", message.message_id)
             reply = Reply(text=":warning: Something went wrong handling that.")
 
+        sent = False
         if reply is not None and reply.denied:
             status = "denied"
         elif reply is not None and reply.text:
             try:
-                await self._send(context, reply)
+                if reply.timer is not None:
+                    with reply.timer.waiting("rc"):
+                        await self._send(context, reply)
+                    reply.timer.mark("delivered")
+                else:
+                    await self._send(context, reply)
+                sent = True
                 self._handled += 1
                 status = "error" if reply.error else "ok"
                 error = error or reply.error
             except RocketChatError as exc:
                 status, error = "error", str(exc)
                 log.error("Could not send reply to %s: %s", context.room_id, exc)
+        if reply is not None and reply.on_sent is not None:
+            await reply.on_sent(sent)
 
         duration_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
         await self._log(context, reply, status, error, duration_ms)

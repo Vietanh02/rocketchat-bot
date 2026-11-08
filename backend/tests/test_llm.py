@@ -6,13 +6,14 @@ SDK builds the requests and parses the replies.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
 import pytest
 
 from app.bot.config_store import LLMSettings
-from app.bot.llm import MAX_TOOL_ROUNDS, ConversationMemory, LLMChat, LLMService, ToolCall, Toolbox
+from app.bot.llm import MAX_TOOL_ROUNDS, LLMChat, LLMService, ToolCall, Toolbox
 from app.bot.streaming import STREAM_CURSOR
 from app.integrations import executor
 from app.models import BotConfig, Integration, IntegrationParam, LLMConfig
@@ -37,6 +38,8 @@ class FakeModel:
         self.requests: list[dict] = []
         self.headers: list[httpx.Headers] = []
         self.hang = False
+        # Seconds between streamed pieces, as a real model takes; 0 sends all at once.
+        self.token_delay = 0.0
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -86,6 +89,16 @@ class FakeModel:
             }
             for delta in deltas
         ]
+        if self.token_delay:
+            delay = self.token_delay
+
+            async def paced():
+                for event in events:
+                    yield f"data: {json.dumps(event)}\n\n".encode()
+                    await asyncio.sleep(delay)
+                yield b"data: [DONE]\n\n"
+
+            return httpx.Response(200, content=paced(), headers={"content-type": "text/event-stream"})
         payload = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
         return httpx.Response(
             200,
@@ -213,6 +226,7 @@ async def test_an_empty_answer_is_reported(app_env, gateway, model):
 async def test_streaming_mode_shows_the_answer_as_it_arrives(app_env, gateway, model):
     await set_config(app_env, reply_mode="stream", stream_interval_ms=50, stream_chunk_chars=4)
     model.answers = ["one two three four five six"]
+    model.token_delay = 0.03
 
     await app_env.bot._handle(incoming("tell me something"))
 
@@ -222,15 +236,19 @@ async def test_streaming_mode_shows_the_answer_as_it_arrives(app_env, gateway, m
     assert gateway.updates and gateway.updates[0][1].endswith(STREAM_CURSOR)
 
 
-def test_memory_keeps_only_the_latest_turns():
-    memory = ConversationMemory(max_messages=4, max_conversations=2)
-    for n in range(3):
-        memory.remember(("R1", None), f"q{n}", f"a{n}")
-    assert [m["content"] for m in memory.history(("R1", None))] == ["q1", "a1", "q2", "a2"]
+async def test_the_conversation_outlives_a_restart(app_env, gateway, model):
+    model.answers = ["Nice to meet you, An.", "You are An."]
+    await app_env.bot.responder.respond(context("my name is An"))
+    # A new runner has nothing in memory, so it reads the transcript back.
+    app_env.bot.responder.agent.sessions._hot.clear()
+    reply = await app_env.bot.responder.respond(context("what is my name?"))
 
-    memory.remember(("R2", None), "q", "a")
-    memory.remember(("R3", None), "q", "a")
-    assert memory.history(("R1", None)) == []
+    assert reply.text == "You are An."
+    assert [m["content"] for m in model.last_messages[1:]] == [
+        "my name is An",
+        "Nice to meet you, An.",
+        "what is my name?",
+    ]
 
 
 def test_the_model_needs_url_key_and_model():
@@ -325,6 +343,7 @@ async def test_formatting_can_be_turned_off(app_env, gateway, model):
 async def test_streamed_text_is_formatted_as_it_arrives(app_env, gateway, model):
     await set_config(app_env, reply_mode="stream", stream_interval_ms=50, stream_chunk_chars=4)
     model.answers = ["<think>plan the answer</think>Đây là **rất đậm** và *nghiêng* nhé bạn"]
+    model.token_delay = 0.03
 
     await app_env.bot._handle(incoming("tell me"))
 
@@ -470,7 +489,7 @@ async def weather_api(app_env, monkeypatch):
         async with httpx.AsyncClient(transport=httpx.MockTransport(api)) as client:
             return await executor.execute_integration(spec, client=client, **kwargs)
 
-    monkeypatch.setattr("app.bot.llm.execute_integration", execute)
+    monkeypatch.setattr("app.agent.tools.integrations.execute_integration", execute)
 
     integration = Integration(
         name="weather.now",

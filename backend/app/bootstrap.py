@@ -62,6 +62,16 @@ DEFAULT_COMMANDS = [
         "response_type": ResponseType.builtin.value,
         "builtin_name": "tasks",
     },
+    {
+        "name": "new",
+        "description": "Start a new conversation with the assistant",
+        "trigger_type": TriggerType.keyword.value,
+        "pattern": "new",
+        "match_mode": MatchMode.exact.value,
+        "priority": 50,
+        "response_type": ResponseType.builtin.value,
+        "builtin_name": "new",
+    },
 ]
 
 

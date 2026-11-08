@@ -385,3 +385,112 @@ class AuditLog(Base):
     entity: Mapped[str] = mapped_column(String(64))
     entity_id: Mapped[str | None] = mapped_column(String(64))
     detail: Mapped[str] = mapped_column(Text, default="")
+
+
+# --------------------------------------------------------------------------- #
+# Agent: sessions, transcripts and runs
+# --------------------------------------------------------------------------- #
+
+
+class QueueMode(str, enum.Enum):
+    # Messages that arrive while a session is busy get their own turn afterwards.
+    followup = "followup"
+    # Messages that pile up while a session is busy are merged into one turn.
+    collect = "collect"
+
+
+class AgentConfig(Base, TimestampMixin):
+    """How the assistant runs a conversation (single row, id == 1).
+
+    Kept apart from `llm_config`, which says how to reach the model, so that
+    adding these settings needs no change to an existing table.
+    """
+
+    __tablename__ = "agent_config"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    # Reaction put on a message as soon as the model starts on it; "" for none.
+    ack_reaction: Mapped[str] = mapped_column(String(64), default=":eyes:")
+    # A cheaper model on the same gateway for side jobs such as summaries.
+    # Empty uses the main model.
+    fast_model: Mapped[str] = mapped_column(String(256), default="")
+    # A turn never runs longer than this; what was said by then is posted.
+    turn_deadline_seconds: Mapped[float] = mapped_column(Float, default=60.0)
+    queue_mode: Mapped[str] = mapped_column(String(16), default=QueueMode.followup.value)
+    # Start a fresh conversation after this long without messages; 0 never.
+    idle_reset_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    # Older messages are folded into a summary once a conversation has more
+    # than this many; 0 keeps them all (only `history_messages` are sent).
+    summarize_after_messages: Mapped[int] = mapped_column(Integer, default=40)
+    # Run the tools of one model round at the same time.
+    parallel_tools: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class AgentSession(Base, TimestampMixin):
+    """One conversation: a DM, or a channel or thread the bot talks in."""
+
+    __tablename__ = "agent_session"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # e.g. "dm:<roomId>", "room:<roomId>" or "room:<roomId>:t:<tmid>".
+    key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    kind: Mapped[str] = mapped_column(String(16))  # dm|room|thread
+    room_id: Mapped[str] = mapped_column(String(64), index=True)
+    thread_id: Mapped[str | None] = mapped_column(String(64))
+    owner_rc_user_id: Mapped[str | None] = mapped_column(String(64))
+    owner_username: Mapped[str | None] = mapped_column(String(128))
+    # What the model was told about messages folded away by compaction.
+    summary: Mapped[str] = mapped_column(Text, default="")
+    # Bumped by `new` and idle resets; messages of older generations are kept
+    # for the portal but never sent to the model again.
+    generation: Mapped[int] = mapped_column(Integer, default=1)
+    last_active_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
+class AgentMessage(Base):
+    """One message of a session's transcript."""
+
+    __tablename__ = "agent_message"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_session.id", ondelete="CASCADE"), index=True
+    )
+    generation: Mapped[int] = mapped_column(Integer, default=1)
+    role: Mapped[str] = mapped_column(String(16))  # user|assistant
+    content: Mapped[str] = mapped_column(Text, default="")
+    sender_username: Mapped[str | None] = mapped_column(String(128))
+    # Folded into the session summary; no longer sent as a message.
+    compacted: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
+class AgentRun(Base):
+    """One turn of the model: how long each step took, for Logs and benchmarks."""
+
+    __tablename__ = "agent_run"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_session.id", ondelete="SET NULL"), index=True
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    trigger: Mapped[str] = mapped_column(String(16), default="chat")
+    status: Mapped[str] = mapped_column(String(16), default="ok")  # ok|error|timeout|merged
+    model: Mapped[str] = mapped_column(String(256), default="")
+    rounds: Mapped[int] = mapped_column(Integer, default=0)
+    # [{"name": ..., "ms": ..., "ok": ...}, ...]
+    tools_json: Mapped[str] = mapped_column(Text, default="[]")
+    # Every timing mark of the turn, in milliseconds; see app.agent.timing.
+    timings_json: Mapped[str] = mapped_column(Text, default="{}")
+    ack_ms: Mapped[int | None] = mapped_column(Integer)
+    ttft_ms: Mapped[int | None] = mapped_column(Integer)
+    total_ms: Mapped[int | None] = mapped_column(Integer)
+    overhead_ms: Mapped[float | None] = mapped_column(Float)
+    error: Mapped[str | None] = mapped_column(Text)

@@ -24,6 +24,8 @@ import type {
   TaskRun,
   TokenResponse,
   User,
+  AgentConfig,
+  AgentStats,
 } from "./types";
 
 const TOKEN_KEY = "rcbot.portal.token";
@@ -132,6 +134,10 @@ export const api = {
   getLLM: () => get<LLMConfig>("/api/llm"),
   updateLLM: (changes: LLMConfigUpdate) => put<LLMConfig>("/api/llm", changes),
   testLLM: (payload: LLMTestRequest) => post<LLMTestResult>("/api/llm/test", payload),
+
+  getAgent: () => get<AgentConfig>("/api/agent"),
+  updateAgent: (changes: Partial<AgentConfig>) => put<AgentConfig>("/api/agent", changes),
+  agentStats: (hours = 24) => get<AgentStats>(`/api/agent/stats?hours=${hours}`),
 
   listAccess: () => get<AccessEntry[]>("/api/access"),
   addAccess: (usernames: string, note = "") =>
