@@ -161,6 +161,12 @@ class BotService:
                 asyncio.create_task(self._dispatch(), name="bot-dispatcher"),
             ]
             log.info("Bot started as @%s", self._bot_username or "?")
+            resume = getattr(self.responder, "resume_jobs", None)
+            if resume is not None:
+                try:
+                    await resume()
+                except Exception:  # noqa: BLE001 - chat works without them
+                    log.warning("Could not resume the jobs under way", exc_info=True)
 
     async def _connect(self, settings: BotSettingsSnapshot) -> None:
         rest = RocketChatRest(

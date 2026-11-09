@@ -315,3 +315,68 @@ async def _mutate_task(ctx: BuiltinContext, rest: list[str], *, mode: str) -> st
 
     state = "resumed" if mode == "on" else "paused"
     return f":white_check_mark: Reminder **#{task_id}** ({title}) {state}."
+
+
+# --------------------------------------------------------------------------- #
+# job
+# --------------------------------------------------------------------------- #
+
+JOB_USAGE = "Usage: `job list`, `job status <id>`, `job cancel <id>`."
+JOB_ICONS = {
+    "planned": ":white_small_square:",
+    "running": ":hourglass_flowing_sand:",
+    "done": ":white_check_mark:",
+    "failed": ":x:",
+    "cancelled": ":no_entry_sign:",
+}
+
+
+@builtin("job")
+async def job_command(ctx: BuiltinContext) -> str:
+    """The person's jobs: work the assistant does in several steps."""
+    jobs = ctx.agent.jobs if ctx.agent is not None else None
+    if jobs is None:
+        return "Jobs are not available."
+    if not ctx.message.sender_id:
+        return "I cannot tell who you are, so I cannot list your jobs."
+    from app.agent.jobs import ICONS as PHASE_ICONS, parse_job_id
+
+    argv = ctx.match.args
+    action = argv[0].casefold() if argv else "list"
+    if action in {"list", "ls"}:
+        mine = await jobs.list(owner=ctx.message.sender_id, limit=10)
+        if not mine:
+            return "You have no jobs. I start one when something takes several steps."
+        lines = ["**Your jobs**"]
+        for job in mine:
+            done = sum(1 for p in job.phases if p.status == "done")
+            lines.append(
+                f"{JOB_ICONS.get(job.status, '')} **#{job.id}** {job.title} "
+                f"- {job.status}, {done}/{len(job.phases)} steps"
+            )
+        lines.append(f"\n{JOB_USAGE}")
+        return "\n".join(lines)
+    if action not in {"status", "show", "cancel", "stop"}:
+        return f":warning: Unknown action `{action}`.\n{JOB_USAGE}"
+    job_id = parse_job_id(argv[1]) if len(argv) > 1 else None
+    if job_id is None:
+        return f":warning: Which job? {JOB_USAGE}"
+    job = await jobs.get(job_id)
+    # People may only see and stop their own jobs.
+    if job is None or job.owner_rc_user_id != ctx.message.sender_id:
+        return f":warning: You have no job **#{job_id}**."
+    if action in {"cancel", "stop"}:
+        if not await jobs.cancel(job_id):
+            return f"Job **#{job_id}** is already {job.status}."
+        return f":no_entry_sign: Stopped job **#{job_id}** ({job.title})."
+    lines = [f"{JOB_ICONS.get(job.status, '')} **Job #{job.id}: {job.title}** - {job.status}"]
+    for phase in job.phases:
+        lines.append(f"{PHASE_ICONS.get(phase.status, '')} {phase.ord}. {phase.goal}")
+        if phase.status == "done" and phase.output:
+            summary = " ".join(phase.output.split())
+            lines.append(f"    _{summary[:200]}{'…' if len(summary) > 200 else ''}_")
+        if phase.error:
+            lines.append(f"    :warning: {phase.error}")
+    if job.error:
+        lines.append(f":warning: {job.error}")
+    return "\n".join(lines)

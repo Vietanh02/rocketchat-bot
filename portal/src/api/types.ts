@@ -308,6 +308,11 @@ export interface AgentConfig {
   idle_reset_minutes: number;
   summarize_after_messages: number;
   parallel_tools: boolean;
+  jobs_enabled: boolean;
+  /** A turn still running after this long goes on as a job; 0 never. */
+  job_after_seconds: number;
+  job_max_phases: number;
+  jobs_per_user: number;
 }
 
 export interface Percentiles {
@@ -565,4 +570,35 @@ export interface CacheTestResult {
   matched_by: string | null;
   score: number | null;
   reply: string | null;
+}
+
+export type JobStatus = "planned" | "running" | "done" | "failed" | "cancelled";
+
+export interface JobPhase {
+  ord: number;
+  goal: string;
+  status: "waiting" | "running" | "done" | "failed";
+  output: string;
+  error: string | null;
+  attempts: number;
+  started_at: string | null;
+  ended_at: string | null;
+}
+
+export interface Job {
+  id: number;
+  status: JobStatus;
+  title: string;
+  question: string;
+  room_id: string;
+  thread_id: string | null;
+  owner_username: string | null;
+  started_by: string;
+  current_phase: number;
+  result: string;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  ended_at: string | null;
+  phases: JobPhase[];
 }

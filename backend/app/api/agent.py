@@ -35,6 +35,10 @@ def _to_out(config: AgentConfig) -> AgentConfigOut:
         idle_reset_minutes=config.idle_reset_minutes,
         summarize_after_messages=config.summarize_after_messages,
         parallel_tools=config.parallel_tools,
+        jobs_enabled=config.jobs_enabled,
+        job_after_seconds=config.job_after_seconds,
+        job_max_phases=config.job_max_phases,
+        jobs_per_user=config.jobs_per_user,
     )
 
 

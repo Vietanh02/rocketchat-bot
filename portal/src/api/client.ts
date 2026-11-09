@@ -45,6 +45,7 @@ import type {
   CacheConfig,
   CacheStats,
   CacheTestResult,
+  Job,
 } from "./types";
 
 const TOKEN_KEY = "rcbot.portal.token";
@@ -221,6 +222,9 @@ export const api = {
   deleteAnswer: (id: number) => del(`/api/cache/answers/${id}`),
   clearSavedAnswers: () => request<{ removed: number }>("/api/cache/answers?kind=auto", { method: "DELETE" }),
   testCache: (question: string) => post<CacheTestResult>("/api/cache/test", { question }),
+
+  listJobs: () => get<Job[]>("/api/jobs"),
+  cancelJob: (id: number) => post<Job>(`/api/jobs/${id}/cancel`),
 
   listAccess: () => get<AccessEntry[]>("/api/access"),
   addAccess: (usernames: string, note = "") =>

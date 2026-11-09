@@ -22,6 +22,7 @@ from typing import Protocol
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.intent import LOOKUP
+from app.agent.jobs import JobService
 from app.agent.queue import MERGED, QueueFull
 from app.agent.runner import AgentResult, AgentRunner, AgentTurn
 from app.agent.timing import TurnTimer
@@ -100,6 +101,8 @@ class RuleResponder:
         self.agent = AgentRunner(session_factory)
         # The document pipeline indexes with the configured model.
         self.agent.kb.model_access = self._kb_model
+        # Work in several steps, posted in the conversation as it goes.
+        self.agent.jobs = JobService(session_factory, self.agent, self._kb_model, gateway_provider)
         self._gateway_checked: dict[str, float] = {}
         self._background: set[asyncio.Task] = set()
         # Posted message id -> what it answered.
@@ -579,6 +582,12 @@ class RuleResponder:
                 )
 
         self._spawn(wrap_up())
+
+    async def resume_jobs(self) -> int:
+        """Go on with the jobs a restart interrupted (the bot is connected again)."""
+        if self.agent.jobs is None:
+            return 0
+        return await self.agent.jobs.resume()
 
     async def aclose(self) -> None:
         await self.agent.close()

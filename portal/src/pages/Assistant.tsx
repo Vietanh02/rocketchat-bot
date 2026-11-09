@@ -210,6 +210,58 @@ export default function AssistantPage() {
           />
         </div>
       </Card>
+
+      <Card title="Jobs">
+        <div className="stack">
+          <p className="hint" style={{ marginTop: 0 }}>
+            Work that takes several steps runs as a <Link to="/jobs">job</Link>: each step is a turn of
+            its own, a checklist in the conversation shows progress, and the answer is posted at the end.
+            People can keep chatting meanwhile, and use <code>job list</code>, <code>job status</code>{" "}
+            and <code>job cancel</code>.
+          </p>
+          <Checkbox
+            label="Let the assistant start jobs"
+            checked={form.jobs_enabled}
+            disabled={!isAdmin}
+            onChange={(value) => set("jobs_enabled", value)}
+          />
+          <div className="grid">
+            <Field
+              label="Go on as a job after (seconds)"
+              hint="A reply still being worked out by then is split into steps by the fast model. 0: never; the reply is cut off at the deadline."
+            >
+              <input
+                type="number"
+                min={0}
+                max={600}
+                value={form.job_after_seconds}
+                disabled={!isAdmin || !form.jobs_enabled}
+                onChange={(event) => set("job_after_seconds", Number(event.target.value))}
+              />
+            </Field>
+            <Field label="Steps per job (most)">
+              <input
+                type="number"
+                min={1}
+                max={12}
+                value={form.job_max_phases}
+                disabled={!isAdmin || !form.jobs_enabled}
+                onChange={(event) => set("job_max_phases", Number(event.target.value))}
+              />
+            </Field>
+            <Field label="Jobs per person at once">
+              <input
+                type="number"
+                min={1}
+                max={20}
+                value={form.jobs_per_user}
+                disabled={!isAdmin || !form.jobs_enabled}
+                onChange={(event) => set("jobs_per_user", Number(event.target.value))}
+              />
+            </Field>
+          </div>
+        </div>
+      </Card>
     </form>
   );
 }

@@ -13,6 +13,7 @@ const NAV = [
   { to: "/memory", label: "Memory" },
   { to: "/knowledge", label: "Knowledge base" },
   { to: "/cache", label: "Cache" },
+  { to: "/jobs", label: "Jobs" },
   { to: "/tasks", label: "Reminders" },
   { to: "/access", label: "Access" },
   { to: "/logs", label: "Logs" },

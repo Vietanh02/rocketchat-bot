@@ -424,3 +424,19 @@ forgotten when a document changes. An integration whose **Reuse answers for** is
 its last successful response for the same request; only set it on calls that read.
 
 The code lives in `app/cache/` (answers and the in-memory cache) and `app/api/cache.py`.
+
+### Jobs: work in several steps
+
+A request that needs more than one reply ("compare these policies and write a summary") runs
+as a **job**. The model starts one with its `start_job` tool, or a reply still being worked out
+after *Go on as a job after* (45 s by default, Assistant page) is split into steps by the fast
+model and handed over. Each step is a turn of its own with the same tools and the turn
+deadline; its result is stored as it is done, so a restart goes on from the step under way. A
+checklist in the conversation shows progress, and the answer is posted at the end and added to
+the conversation. People can keep chatting meanwhile.
+
+In chat: `job list`, `job status <id>`, `job cancel <id>` (people see only their own jobs).
+Admins see every job, with each step's output, on the **Jobs** page. Two jobs run at once; each
+person may have two under way (configurable), with up to six steps each.
+
+The code lives in `app/agent/jobs.py` and `app/api/jobs.py`.

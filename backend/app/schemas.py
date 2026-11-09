@@ -570,6 +570,10 @@ class AgentConfigOut(BaseModel):
     idle_reset_minutes: int
     summarize_after_messages: int
     parallel_tools: bool
+    jobs_enabled: bool
+    job_after_seconds: float
+    job_max_phases: int
+    jobs_per_user: int
 
 
 class AgentConfigUpdate(BaseModel):
@@ -581,6 +585,11 @@ class AgentConfigUpdate(BaseModel):
     idle_reset_minutes: int | None = Field(default=None, ge=0, le=60 * 24 * 30)
     summarize_after_messages: int | None = Field(default=None, ge=0, le=1000)
     parallel_tools: bool | None = None
+    jobs_enabled: bool | None = None
+    # 0: a turn is never handed over to a job.
+    job_after_seconds: float | None = Field(default=None, ge=0, le=600)
+    job_max_phases: int | None = Field(default=None, ge=1, le=12)
+    jobs_per_user: int | None = Field(default=None, ge=1, le=20)
 
     @field_validator("ack_reaction", "fast_model")
     @classmethod
@@ -934,3 +943,37 @@ class CacheTestOut(BaseModel):
     matched_by: str | None = None
     score: float | None = None
     reply: str | None = None
+
+
+# --------------------------------------------------------------------------- #
+# Jobs
+# --------------------------------------------------------------------------- #
+
+
+class JobPhaseOut(BaseModel):
+    ord: int
+    goal: str
+    status: str
+    output: str
+    error: str | None = None
+    attempts: int
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+
+
+class JobOut(BaseModel):
+    id: int
+    status: Literal["planned", "running", "done", "failed", "cancelled"]
+    title: str
+    question: str
+    room_id: str
+    thread_id: str | None = None
+    owner_username: str | None = None
+    started_by: str
+    current_phase: int
+    result: str
+    error: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    phases: list[JobPhaseOut]

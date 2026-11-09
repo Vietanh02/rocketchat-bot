@@ -141,6 +141,10 @@ class AgentSettings:
     idle_reset_minutes: int = 0
     summarize_after_messages: int = 40
     parallel_tools: bool = True
+    jobs_enabled: bool = True
+    job_after_seconds: float = 45.0
+    job_max_phases: int = 6
+    jobs_per_user: int = 2
 
     @classmethod
     def from_model(cls, model: AgentConfig) -> AgentSettings:
@@ -152,6 +156,10 @@ class AgentSettings:
             idle_reset_minutes=model.idle_reset_minutes,
             summarize_after_messages=model.summarize_after_messages,
             parallel_tools=model.parallel_tools,
+            jobs_enabled=model.jobs_enabled,
+            job_after_seconds=model.job_after_seconds,
+            job_max_phases=model.job_max_phases,
+            jobs_per_user=model.jobs_per_user,
         )
 
 

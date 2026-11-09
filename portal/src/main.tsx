@@ -15,6 +15,7 @@ import LoginPage from "./pages/Login";
 import LogsPage from "./pages/Logs";
 import KnowledgePage from "./pages/Knowledge";
 import CachePage from "./pages/Cache";
+import JobsPage from "./pages/Jobs";
 import MemoryPage from "./pages/Memory";
 import SettingsPage from "./pages/Settings";
 import TasksPage from "./pages/Tasks";
@@ -36,6 +37,7 @@ function App() {
         <Route path="/memory" element={<MemoryPage />} />
         <Route path="/knowledge" element={<KnowledgePage />} />
         <Route path="/cache" element={<CachePage />} />
+        <Route path="/jobs" element={<JobsPage />} />
         <Route path="/tasks" element={<TasksPage />} />
         <Route path="/access" element={<AccessPage />} />
         <Route path="/logs" element={<LogsPage />} />

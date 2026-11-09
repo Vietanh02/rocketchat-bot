@@ -8,6 +8,10 @@ into a summary, and picking facts to remember when that is turned on,
 happen afterwards, off the reply path, with the fast model when one is
 configured.
 
+Work that takes several steps goes on as a job (`app.agent.jobs`): the
+model starts one with `start_job`, or a turn still running after
+`job_after_seconds` is handed over to one.
+
 A question to look up in the knowledge base is first matched against the
 answers kept for it (`app.cache.answers`): a match is posted at once,
 without the model. A turn that answered from the knowledge base alone
@@ -31,6 +35,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.intent import COMMAND, LOOKUP, Intent, about_a_document, detect
+from app.agent.jobs import JobError, JobService, JobTools
 from app.agent.memory import MemoryScopes, MemoryStore, Note, NoteError
 from app.agent.profiles import ProfileStore
 from app.agent.prompt import COMMAND_NOTE, build_messages, passages_block
@@ -133,6 +138,8 @@ class AgentRunner:
         # Results of integrations whose answers may be reused (`cache_seconds`).
         self.tool_results: TTLCache = TTLCache(512, 60.0)
         self.queue = SessionQueue()
+        # Set by the responder, which can post in the conversation.
+        self.jobs: JobService | None = None
         self._background: set[asyncio.Task] = set()
         self._compacting: set[str] = set()
 
@@ -294,6 +301,19 @@ class AgentRunner:
                     min_score=snapshot.knowledge.min_score,
                 )
             )
+        jobs_on = self.jobs is not None and settings.jobs_enabled
+        job_tools = None
+        if jobs_on:
+            job_tools = JobTools(
+                self.jobs,  # type: ignore[arg-type]
+                message=turn.message,
+                question=question,
+                thread_id=turn.thread_id,
+                session_key=key,
+                session_kind=kind,
+                snapshot=snapshot,
+            )
+            providers.append(job_tools)
         registry = ToolRegistry(providers)
 
         so_far = ""
@@ -320,8 +340,13 @@ class AgentRunner:
                 show()
 
         status, error = "ok", None
+        deadline = settings.turn_deadline_seconds
+        # Past this, the work goes on as a job instead of being cut off.
+        hand_off = jobs_on and 0 < settings.job_after_seconds < deadline
+        if hand_off:
+            deadline = settings.job_after_seconds
         try:
-            async with asyncio.timeout(settings.turn_deadline_seconds):
+            async with asyncio.timeout(deadline):
                 raw = await chat.complete(
                     messages,
                     on_text=None if live is None else on_text,
@@ -331,9 +356,15 @@ class AgentRunner:
                     timer=timer,
                 )
         except TimeoutError:
+            log.info("Turn in %s hit the %gs deadline", key, deadline)
+            if hand_off and not (job_tools and job_tools.started):
+                handed = await self._hand_off(
+                    turn, question, recent, key, kind, snapshot, chat, state.id, len(turns)
+                )
+                if handed is not None:
+                    return handed
             status, raw = "timeout", so_far
-            error = f"stopped after {settings.turn_deadline_seconds:g}s"
-            log.info("Turn in %s hit the %gs deadline", key, settings.turn_deadline_seconds)
+            error = f"stopped after {deadline:g}s"
         except LLMError as exc:
             log.info("LLM reply failed: %s", exc)
             return AgentResult("", "error", str(exc), state.id, chat.model, len(turns))
@@ -382,6 +413,45 @@ class AgentRunner:
         return AgentResult(
             shown, status, error, state.id, chat.model, len(turns), learning=learning
         )
+
+    async def _hand_off(
+        self,
+        turn: AgentTurn,
+        question: str,
+        recent: list,
+        key: str,
+        kind: str,
+        snapshot: ConfigSnapshot,
+        chat: LLMChat,
+        session_id: int | None,
+        turns: int,
+    ) -> AgentResult | None:
+        """Go on with a turn that ran long as a job; None if it cannot."""
+        assert self.jobs is not None
+        plan = await self.jobs.plan(chat, question, recent, snapshot)
+        if plan is None:
+            return None
+        try:
+            job = await self.jobs.create(
+                plan,
+                message=turn.message,
+                question=question,
+                thread_id=turn.thread_id,
+                session_key=key,
+                session_kind=kind,
+                snapshot=snapshot,
+                started_by="deadline",
+            )
+        except JobError as exc:
+            log.info("Could not hand the turn in %s over to a job: %s", key, exc)
+            return None
+        self.jobs.start(job.id)
+        turn.timer.labels["job"] = str(job.id)
+        text = (
+            f":hourglass_flowing_sand: This takes more than one reply, so I am working on it as "
+            f"job #{job.id} in {len(plan.steps)} steps. Progress and the answer will appear here."
+        )
+        return AgentResult(text, "ok", None, session_id, chat.model, turns)
 
     async def _kept_answer(
         self, wording: str, documents: str, snapshot: ConfigSnapshot, timer: TurnTimer
@@ -630,6 +700,8 @@ class AgentRunner:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         self._compacting.clear()
+        if self.jobs is not None:
+            await self.jobs.close()
         await self.answers.close()
         await self.memory.close()
         await self.kb.close()

@@ -434,6 +434,14 @@ class AgentConfig(Base, TimestampMixin):
     summarize_after_messages: Mapped[int] = mapped_column(Integer, default=40)
     # Run the tools of one model round at the same time.
     parallel_tools: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Work that takes several steps runs as a job: each step a turn of its
+    # own, with progress shown in the thread (`AgentJob`).
+    jobs_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # A turn still running after this long goes on as a job; 0 never.
+    job_after_seconds: Mapped[float] = mapped_column(Float, default=45.0)
+    job_max_phases: Mapped[int] = mapped_column(Integer, default=6)
+    # Jobs one person may have under way at once.
+    jobs_per_user: Mapped[int] = mapped_column(Integer, default=2)
 
 
 class AgentSession(Base, TimestampMixin):
@@ -883,3 +891,70 @@ class AnswerKey(Base):
     embedded_model: Mapped[str] = mapped_column(String(64), default="", index=True)
 
     entry: Mapped[AnswerEntry] = relationship(back_populates="keys")
+
+
+class JobStatus(str, enum.Enum):
+    planned = "planned"
+    running = "running"
+    done = "done"
+    failed = "failed"
+    cancelled = "cancelled"
+
+
+class AgentJob(Base, TimestampMixin):
+    """Work done in several steps (phases), each a turn of its own.
+
+    Started when the model calls `start_job`, or when a turn runs past
+    `AgentConfig.job_after_seconds`. Each phase's output is kept as it is
+    done, so a restart goes on from the phase that was under way.
+    """
+
+    __tablename__ = "agent_job"
+    __table_args__ = {"sqlite_autoincrement": True}
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), default=JobStatus.planned.value, index=True)
+    title: Mapped[str] = mapped_column(String(300))
+    # What was asked, as the model was asked it.
+    question: Mapped[str] = mapped_column(Text)
+    # The conversation it belongs to (`app.agent.session`).
+    session_key: Mapped[str] = mapped_column(String(255), index=True)
+    session_kind: Mapped[str] = mapped_column(String(16))
+    room_id: Mapped[str] = mapped_column(String(64))
+    thread_id: Mapped[str | None] = mapped_column(String(64))
+    owner_rc_user_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    owner_username: Mapped[str | None] = mapped_column(String(128))
+    # The message that started it, to answer as it would have been answered.
+    message_json: Mapped[str] = mapped_column(Text, default="{}")
+    # "tool" (the model asked) or "deadline" (the turn ran long).
+    started_by: Mapped[str] = mapped_column(String(16), default="tool")
+    current_phase: Mapped[int] = mapped_column(Integer, default=0)
+    # The final answer, as posted.
+    result: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str | None] = mapped_column(Text)
+    # The checklist message edited as phases finish.
+    progress_msg_id: Mapped[str | None] = mapped_column(String(64))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    phases: Mapped[list[AgentJobPhase]] = relationship(
+        back_populates="job", cascade="all, delete-orphan", order_by="AgentJobPhase.ord"
+    )
+
+
+class AgentJobPhase(Base):
+    __tablename__ = "agent_job_phase"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("agent_job.id", ondelete="CASCADE"), index=True)
+    ord: Mapped[int] = mapped_column(Integer)
+    goal: Mapped[str] = mapped_column(Text)
+    # waiting|running|done|failed
+    status: Mapped[str] = mapped_column(String(16), default="waiting")
+    output: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str | None] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    job: Mapped[AgentJob] = relationship(back_populates="phases")

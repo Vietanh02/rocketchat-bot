@@ -16,6 +16,7 @@ from app.api import (
     commands,
     config as config_api,
     integrations,
+    jobs as jobs_api,
     knowledge,
     llm,
     logs,
@@ -81,6 +82,7 @@ def create_app() -> FastAPI:
     app.include_router(memory.router)
     app.include_router(knowledge.router)
     app.include_router(cache_api.router)
+    app.include_router(jobs_api.router)
     app.include_router(tasks.router)
     app.include_router(logs.router)
     app.include_router(access.router)

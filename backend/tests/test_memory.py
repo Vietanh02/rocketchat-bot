@@ -560,7 +560,8 @@ async def test_memory_can_be_turned_off(app_env, gateway, model):
     await memory_of(app_env).add("user:U1", "Likes coffee", embedding=EmbeddingSettings())
     await app_env.bot.responder.respond(context("coffee?"))
     assert "Likes coffee" not in json.dumps(model.requests[0])
-    assert "tools" not in model.requests[0]
+    offered = [t["function"]["name"] for t in model.requests[0].get("tools", [])]
+    assert not any(name.startswith(("memory_", "profile_")) for name in offered)
 
 
 async def test_the_user_updates_their_profile(app_env, gateway, model):

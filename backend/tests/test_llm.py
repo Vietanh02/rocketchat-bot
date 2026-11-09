@@ -45,6 +45,8 @@ class FakeModel:
         self.on_judge = lambda body: "unsure"
         # Asked to keep an answer for next time; by default nothing is kept.
         self.on_learn = lambda body: '{"reusable": false}'
+        # Asked to split a long request into steps; by default no plan.
+        self.on_plan = lambda body: "no plan"
         # Seconds between streamed pieces, as a real model takes; 0 sends all at once.
         self.token_delay = 0.0
 
@@ -52,16 +54,20 @@ class FakeModel:
     INDEX_PROMPT = "You index a document"
     JUDGE_PROMPT = "You check search results"
     LEARN_PROMPT = "You prepare an answer to keep"
+    PLAN_PROMPT = "You plan work an assistant will do"
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         system = next((m.get("content") or "" for m in body.get("messages", []) if m.get("role") == "system"), "")
-        if system.startswith((self.INDEX_PROMPT, self.JUDGE_PROMPT, self.LEARN_PROMPT)):
+        sides = (self.INDEX_PROMPT, self.JUDGE_PROMPT, self.LEARN_PROMPT, self.PLAN_PROMPT)
+        if system.startswith(sides):
             self.side_requests.append(body)
             if system.startswith(self.INDEX_PROMPT):
                 handler = self.on_index
             elif system.startswith(self.JUDGE_PROMPT):
                 handler = self.on_judge
+            elif system.startswith(self.PLAN_PROMPT):
+                handler = self.on_plan
             else:
                 handler = self.on_learn
             return _completion(body, handler(body))
@@ -577,11 +583,12 @@ async def weather_api(app_env, monkeypatch):
 
 
 async def without_memory(runtime) -> None:
-    """Turn memory off, so only integrations are offered as tools."""
-    from app.bot.config_store import ensure_memory_config
+    """Turn memory and jobs off, so only integrations are offered as tools."""
+    from app.bot.config_store import ensure_agent_config, ensure_memory_config
 
     async with runtime.session_factory() as session:
         (await ensure_memory_config(session)).enabled = False
+        (await ensure_agent_config(session)).jobs_enabled = False
         (await session.get(BotConfig, 1)).config_version += 1
         await session.commit()
     runtime.config_store.invalidate()

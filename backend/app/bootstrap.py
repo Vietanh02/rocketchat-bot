@@ -73,6 +73,16 @@ DEFAULT_COMMANDS = [
         "response_type": ResponseType.builtin.value,
         "builtin_name": "new",
     },
+    {
+        "name": "job",
+        "description": "List, follow or stop work the assistant does in steps",
+        "trigger_type": TriggerType.keyword.value,
+        "pattern": "job",
+        "match_mode": MatchMode.prefix.value,
+        "priority": 60,
+        "response_type": ResponseType.builtin.value,
+        "builtin_name": "job",
+    },
 ]
 
 
