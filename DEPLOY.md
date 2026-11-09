@@ -194,7 +194,7 @@ Thư mục được mount chỉ đọc. Không cần khởi động lại.
    Script đóng gói sẽ dừng nếu bốn chỗ không khớp nhau.
 2. Commit, rồi chạy:
    ```bash
-   deploy/package.sh               # mã nguồn + image backend và portal  (~170 MB)
+   deploy/package.sh               # mã nguồn + image backend và portal  (~105 MB)
    deploy/package.sh --with-deps   # thêm image Qdrant và TEI            (~0.7 GB)
    deploy/package.sh --no-images   # chỉ mã nguồn
    ```
