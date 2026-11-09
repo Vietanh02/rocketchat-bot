@@ -40,6 +40,11 @@ import type {
   KbStatus,
   KbUploadResult,
   KnowledgeConfig,
+  AnswerEntry,
+  AnswerEntryDraft,
+  CacheConfig,
+  CacheStats,
+  CacheTestResult,
 } from "./types";
 
 const TOKEN_KEY = "rcbot.portal.token";
@@ -204,6 +209,18 @@ export const api = {
   reindexKnowledge: () => post<KbStatus>("/api/knowledge/reindex"),
   searchKnowledge: (q: string) =>
     get<KbSearchResult>(`/api/knowledge/search?q=${encodeURIComponent(q)}`),
+
+  getCacheConfig: () => get<CacheConfig>("/api/cache/config"),
+  updateCacheConfig: (changes: Partial<CacheConfig>) => put<CacheConfig>("/api/cache/config", changes),
+  cacheStats: () => get<CacheStats>("/api/cache/stats"),
+  listAnswers: (kind?: "auto" | "pinned") =>
+    get<AnswerEntry[]>(`/api/cache/answers${kind ? `?kind=${kind}` : ""}`),
+  pinAnswer: (draft: AnswerEntryDraft) => post<AnswerEntry>("/api/cache/answers", draft),
+  updateAnswer: (id: number, changes: Partial<AnswerEntryDraft>) =>
+    put<AnswerEntry>(`/api/cache/answers/${id}`, changes),
+  deleteAnswer: (id: number) => del(`/api/cache/answers/${id}`),
+  clearSavedAnswers: () => request<{ removed: number }>("/api/cache/answers?kind=auto", { method: "DELETE" }),
+  testCache: (question: string) => post<CacheTestResult>("/api/cache/test", { question }),
 
   listAccess: () => get<AccessEntry[]>("/api/access"),
   addAccess: (usernames: string, note = "") =>

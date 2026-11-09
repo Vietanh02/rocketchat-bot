@@ -402,3 +402,25 @@ endpoints (POST/DELETE) unticked unless that is acceptable.
 
 The code lives in `app/bot/llm.py` (service), `app/bot/rcformat.py` (formatting) and
 `app/api/llm.py` (portal API).
+
+### Kept answers and caches
+
+Questions looked up in the knowledge base can be answered again without the model, in well
+under a second (**Cache** page):
+
+- **Pinned answers**: a question, other ways of asking it, and the answer, written by an admin.
+  Matched with case and spacing ignored, and by meaning when an embedding model is set up
+  (*Similarity for pinned answers*, 0.9 by default).
+- **Saved answers**: after a turn that answered from the knowledge base alone (no other tool,
+  no documents sent in the conversation, passages the model judged to answer), the fast model
+  rewrites the question to stand on its own and answers it from the passages only, so nothing of
+  the person who asked is kept. The same question asked again (0.95 similarity by default) gets
+  it, marked "⚡ Saved answer" with its sources. It goes when a knowledge-base document
+  changes, when it expires (a week by default), or when someone reacts 👎 to it in chat; the
+  question is then worked out afresh. A 👎 on a model answer keeps it from being saved.
+
+Lookups (passages found and the model's choice among them) are kept 10 minutes in memory and
+forgotten when a document changes. An integration whose **Reuse answers for** is set reuses
+its last successful response for the same request; only set it on calls that read.
+
+The code lives in `app/cache/` (answers and the in-memory cache) and `app/api/cache.py`.

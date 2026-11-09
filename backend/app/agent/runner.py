@@ -8,6 +8,11 @@ into a summary, and picking facts to remember when that is turned on,
 happen afterwards, off the reply path, with the fast model when one is
 configured.
 
+A question to look up in the knowledge base is first matched against the
+answers kept for it (`app.cache.answers`): a match is posted at once,
+without the model. A turn that answered from the knowledge base alone
+leaves an answer to keep, written afterwards by the fast model.
+
 Each turn carries a `TurnTimer`; once the reply is posted, `record` writes
 it to `agent_run` for the portal's Logs and for benchmarks.
 """
@@ -36,6 +41,8 @@ from app.agent.tools import ToolProvider, ToolRegistry
 from app.agent.tools.knowledge import KnowledgeTools
 from app.agent.tools.memory import MemoryTools, ProfileTools
 from app.bot.llm import LLMError
+from app.cache.answers import AnswerCache, CachedAnswer
+from app.cache.ttl import TTLCache
 from app.bot.rcformat import strip_thinking
 from app.bot.types import MessageContext
 from app.knowledge.base import BASE_SCOPE, KnowledgeBase, Lookup, Passage, conversation_scope
@@ -52,6 +59,8 @@ log = logging.getLogger(__name__)
 # The latest messages a summary never swallows, whatever `history_messages` says.
 MIN_KEPT_AFTER_SUMMARY = 4
 SUMMARY_MAX_TOKENS = 600
+# Messages of the conversation shown when an answer is rewritten to keep.
+LEARN_HISTORY = 4
 SUMMARY_PROMPT = (
     "You maintain the memory of a chat between users and an assistant. "
     "Rewrite the summary below so it also covers the new messages. Keep names, "
@@ -88,6 +97,8 @@ class AgentTurn:
     live: LiveReply | None = None
     # Set when the kind of message is already known (a document came with it).
     intent: str | None = None
+    # Worked out afresh: no kept answer (asked again after a 👎).
+    fresh: bool = False
 
 
 @dataclass(slots=True)
@@ -100,6 +111,10 @@ class AgentResult:
     model: str = ""
     # How many messages this turn answered (more than one when collected).
     turns: int = 1
+    # Given from the kept answers, without the model.
+    cached: CachedAnswer | None = None
+    # Keeping this turn's answer for next time; gives the entry's id, or None.
+    learning: asyncio.Task | None = None
 
 
 class AgentRunner:
@@ -114,6 +129,9 @@ class AgentRunner:
         self.memory = MemoryStore(session_factory, self.knowledge)
         self.profiles = ProfileStore(session_factory)
         self.kb = KnowledgeBase(session_factory, self.knowledge)
+        self.answers = AnswerCache(session_factory, self.knowledge, self.kb)
+        # Results of integrations whose answers may be reused (`cache_seconds`).
+        self.tool_results: TTLCache = TTLCache(512, 60.0)
         self.queue = SessionQueue()
         self._background: set[asyncio.Task] = set()
         self._compacting: set[str] = set()
@@ -185,6 +203,7 @@ class AgentRunner:
         if knowledge_on:
             self.kb.ensure_indexed(snapshot.embedding)
             self.kb.ensure_pipeline()
+            self.answers.ensure_indexed(snapshot.embedding)
 
         # A question to look up, a request to do something, or small talk?
         wording = turn.message.clean_text or turn.message.text
@@ -200,6 +219,11 @@ class AgentRunner:
         timer.labels["intent"] = intent.kind
         timer.labels["intent_by"] = intent.by
         timer.mark("intent")
+
+        if knowledge_on and intent.kind == LOOKUP and len(turns) == 1 and not turn.fresh:
+            kept = await self._kept_answer(wording, documents, snapshot, timer)
+            if kept is not None:
+                return await self._give_kept(kept, key, kind, question, turn, snapshot)
 
         # The conversation, its notes, the person's profile and the passages
         # for the question, side by side.
@@ -218,6 +242,13 @@ class AgentRunner:
         passages = lookup.passages if lookup is not None else []
         if lookup is not None:
             timer.labels["kb"] = lookup.source or "none"
+        # Taken before answering: an answer kept later must be from these documents.
+        kb_version = (
+            await self.kb.base_version()
+            if lookup is not None and lookup.source == "base" and passages
+            else None
+        )
+        recent = state.history(LEARN_HISTORY)
         context = ""
         if passages:
             context = passages_block([(p.label, p.shown) for p in passages], lookup.source or "")
@@ -309,6 +340,31 @@ class AgentRunner:
         timer.mark("llm_done")
 
         answer = strip_thinking(raw).strip()
+        learning = None
+        if (
+            answer
+            and status == "ok"
+            and kb_version is not None
+            and snapshot.knowledge.answer_cache
+            and len(turns) == 1
+            # The knowledge base alone: no tool, and passages the model judged to answer.
+            and not timer.tools
+            and (lookup.judged or not snapshot.knowledge.llm_judge)
+        ):
+            learning = self._background_task(
+                self.answers.learn(
+                    chat,
+                    question=wording,
+                    history=recent,
+                    passages=passages,
+                    kb_version=kb_version,
+                    settings=snapshot.knowledge,
+                    embedding=snapshot.embedding,
+                    model=snapshot.agent.fast_model or None,
+                    created_by=turn.message.sender_username,
+                ),
+                f"keep-answer-{key}",
+            )
         if answer:
             with timer.waiting("db"):
                 await self.sessions.append(
@@ -323,7 +379,51 @@ class AgentRunner:
                 )
         # The transcript keeps the model's words; the reply also lists the sources.
         shown = with_sources(answer, passages) if answer else answer
-        return AgentResult(shown, status, error, state.id, chat.model, len(turns))
+        return AgentResult(
+            shown, status, error, state.id, chat.model, len(turns), learning=learning
+        )
+
+    async def _kept_answer(
+        self, wording: str, documents: str, snapshot: ConfigSnapshot, timer: TurnTimer
+    ) -> CachedAnswer | None:
+        """The answer kept for this question, unless the conversation has documents of its own."""
+        with timer.waiting("retrieval"):
+            if await self.kb.scopes_with_documents([documents]):
+                return None
+            found = await self.answers.find(
+                wording, embedding=snapshot.embedding, settings=snapshot.knowledge
+            )
+        timer.labels["kept"] = found.kind if found else "miss"
+        return found
+
+    async def _give_kept(
+        self,
+        kept: CachedAnswer,
+        key: str,
+        kind: str,
+        question: str,
+        turn: AgentTurn,
+        snapshot: ConfigSnapshot,
+    ) -> AgentResult:
+        """Answer with a kept answer, and add the exchange to the conversation."""
+        timer = turn.timer
+        timer.labels["kb"] = "kept"
+        with timer.waiting("db"):
+            state = await self.sessions.open(
+                key, kind, turn.message, idle_reset_minutes=snapshot.agent.idle_reset_minutes
+            )
+            await self.sessions.append(
+                state, question, kept.answer, sender_username=turn.message.sender_username
+            )
+        timer.mark("persisted")
+        log.info(
+            "Answered in %s from kept answer %d (%s%s)",
+            key,
+            kept.entry_id,
+            kept.matched_by,
+            f" {kept.score:.3f}" if kept.score is not None else "",
+        )
+        return AgentResult(kept.render(), "ok", None, state.id, "kept answer", 1, cached=kept)
 
     async def _look_up(
         self,
@@ -375,10 +475,11 @@ class AgentRunner:
             log.warning("Could not recall notes for %s", scopes.write, exc_info=True)
             return []
 
-    def _background_task(self, coroutine, name: str) -> None:
+    def _background_task(self, coroutine, name: str) -> asyncio.Task:
         task = asyncio.create_task(coroutine, name=name)
         self._background.add(task)
         task.add_done_callback(self._background.discard)
+        return task
 
     # ----------------------------------------------------------------- #
     # Remembering, after the reply
@@ -529,6 +630,7 @@ class AgentRunner:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         self._compacting.clear()
+        await self.answers.close()
         await self.memory.close()
         await self.kb.close()
         await self.knowledge.aclose()

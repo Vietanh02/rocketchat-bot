@@ -12,6 +12,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from app.agent.tools import ToolRegistry, tool_name, tool_result
+from app.cache.ttl import TTLCache
 from app.integrations.executor import (
     IntegrationError,
     IntegrationSpec,
@@ -25,9 +26,17 @@ log = logging.getLogger(__name__)
 class IntegrationTools:
     """One tool per integration; arguments are bound like a command's parameters."""
 
-    def __init__(self, specs: Iterable[IntegrationSpec], context: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        specs: Iterable[IntegrationSpec],
+        context: dict[str, Any],
+        *,
+        cache: TTLCache | None = None,
+    ) -> None:
         # What integration templates see, as when a command calls them.
         self._context = context
+        # Where answers of integrations with `cache_seconds` are reused from.
+        self._cache = cache
         self._specs: dict[str, IntegrationSpec] = {}
         for spec in specs:
             # Integration names may hold characters function names do not allow.
@@ -47,11 +56,18 @@ class IntegrationTools:
         }
         try:
             params = bind_params(spec.params, [], named=named)
-            result = await execute_integration(spec, params=params, base_context=self._context)
+            result = await execute_integration(
+                spec, params=params, base_context=self._context, cache=self._cache
+            )
         except IntegrationError as exc:
             log.info("LLM tool %r failed: %s", spec.name, exc)
             return tool_result({"error": str(exc)})
-        log.info("LLM tool %r returned HTTP %s", spec.name, result.status_code)
+        log.info(
+            "LLM tool %r returned HTTP %s%s",
+            spec.name,
+            result.status_code,
+            " (reused)" if result.cached else "",
+        )
         if not result.ok:
             return tool_result({"error": result.error, "response": result.data})
         response = result.data if result.data is not None else result.text

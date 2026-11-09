@@ -250,6 +250,10 @@ class KnowledgeSettings:
     llm_index: bool = True
     llm_judge: bool = True
     index_model: str = ""
+    answer_cache: bool = True
+    answer_min_similarity: float = 0.95
+    pinned_min_similarity: float = 0.9
+    answer_ttl_hours: int = 168
 
     @classmethod
     def from_model(cls, model: KnowledgeConfig) -> KnowledgeSettings:
@@ -262,6 +266,10 @@ class KnowledgeSettings:
             llm_index=model.llm_index,
             llm_judge=model.llm_judge,
             index_model=(model.index_model or "").strip(),
+            answer_cache=model.answer_cache,
+            answer_min_similarity=model.answer_min_similarity,
+            pinned_min_similarity=model.pinned_min_similarity,
+            answer_ttl_hours=model.answer_ttl_hours,
         )
 
 

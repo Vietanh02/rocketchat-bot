@@ -33,6 +33,8 @@ class MessageContext:
     # time.monotonic() when the bot received it.
     arrived: float = field(default_factory=time.monotonic)
     files: tuple[RcFile, ...] = ()
+    # Asked again after a 👎: worked out afresh, not from kept answers.
+    fresh: bool = False
 
     @property
     def is_direct(self) -> bool:
@@ -110,3 +112,5 @@ class Reply:
     timer: TurnTimer | None = None
     # Called once the reply is posted (or failed to post), off the reply path.
     on_sent: Callable[[bool], Awaitable[None]] | None = None
+    # The id of the posted message (the last one, when it was split).
+    posted_id: str | None = None

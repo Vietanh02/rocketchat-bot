@@ -390,6 +390,8 @@ class IntegrationBase(BaseModel):
     timeout_seconds: float = Field(default=10.0, gt=0, le=120)
     enabled: bool = True
     llm_tool: bool = False
+    # Reuse a successful answer this long for the same request; 0 never.
+    cache_seconds: int = Field(default=0, ge=0, le=86400)
 
 
 class IntegrationCreate(IntegrationBase):
@@ -414,6 +416,7 @@ class IntegrationUpdate(BaseModel):
     timeout_seconds: float | None = Field(default=None, gt=0, le=120)
     enabled: bool | None = None
     llm_tool: bool | None = None
+    cache_seconds: int | None = Field(default=None, ge=0, le=86400)
     params: list[IntegrationParamIn] | None = None
 
 
@@ -855,3 +858,79 @@ class KbStatusOut(BaseModel):
     semantic: bool
     # Documents per stage of the language model's indexing.
     stages: dict[str, int] = Field(default_factory=dict)
+
+
+# --------------------------------------------------------------------------- #
+# Kept answers and caches
+# --------------------------------------------------------------------------- #
+
+
+class CacheConfigOut(BaseModel):
+    # Save answers to knowledge-base questions and give them again.
+    answer_cache: bool
+    answer_min_similarity: float
+    pinned_min_similarity: float
+    answer_ttl_hours: int
+
+
+class CacheConfigUpdate(BaseModel):
+    answer_cache: bool | None = None
+    answer_min_similarity: float | None = Field(default=None, ge=0.5, le=1)
+    pinned_min_similarity: float | None = Field(default=None, ge=0.5, le=1)
+    answer_ttl_hours: int | None = Field(default=None, ge=1, le=24 * 365)
+
+
+class AnswerSourceOut(BaseModel):
+    number: int
+    label: str
+
+
+class AnswerEntryOut(BaseModel):
+    id: int
+    kind: Literal["auto", "pinned"]
+    question: str
+    # Other ways of asking it, besides `question`.
+    alternatives: list[str]
+    answer: str
+    sources: list[AnswerSourceOut]
+    hits: int
+    downvotes: int
+    last_hit_at: datetime | None = None
+    expires_at: datetime | None = None
+    created_by: str | None = None
+    created_at: datetime
+    # Every way of asking has a vector of the current embedding model.
+    embedded: bool
+
+
+class AnswerEntryIn(BaseModel):
+    question: str = Field(min_length=1, max_length=500)
+    alternatives: list[str] = Field(default_factory=list, max_length=19)
+    answer: str = Field(min_length=1, max_length=12000)
+
+
+class AnswerEntryUpdate(BaseModel):
+    question: str | None = Field(default=None, min_length=1, max_length=500)
+    alternatives: list[str] | None = Field(default=None, max_length=19)
+    answer: str | None = Field(default=None, min_length=1, max_length=12000)
+
+
+class CacheStatsOut(BaseModel):
+    saved: int
+    pinned: int
+    # Given from kept answers since the bot started.
+    served: int
+    # In memory: looked-up passages, and integration answers.
+    lookups: dict[str, int]
+    tool_results: dict[str, int]
+
+
+class CacheTestOut(BaseModel):
+    """What a question would get from the kept answers."""
+
+    found: bool
+    entry_id: int | None = None
+    kind: str | None = None
+    matched_by: str | None = None
+    score: float | None = None
+    reply: str | None = None

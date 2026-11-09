@@ -11,9 +11,12 @@ while it streams in and once it is complete.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -31,6 +34,8 @@ from app.bot.router import MatchResult
 from app.bot.scripts import ScriptError, clip_output, result_to_reply, run_script
 from app.bot.streaming import DeliveryOptions, LiveReply
 from app.bot.types import MessageContext, Reply
+from app.cache.answers import CachedAnswer
+from app.cache.ttl import TTLCache
 from app.integrations.executor import (
     IntegrationError,
     assert_url_allowed,
@@ -55,6 +60,20 @@ GatewayProvider = Callable[[], Gateway | None]
 GATEWAY_CHECK_TTL_SECONDS = 300.0
 # Documents read from one message; more are ignored.
 MAX_DOCUMENTS_PER_MESSAGE = 5
+# Answers a 👎 can still act on: how many, and for how long.
+ANSWERED_KEPT = 2000
+ANSWERED_TTL_SECONDS = 7 * 24 * 3600.0
+
+
+@dataclass(slots=True)
+class Answered:
+    """A model answer posted in chat, as a later 👎 on it needs it."""
+
+    message: MessageContext
+    # Given from a kept answer.
+    cached: CachedAnswer | None = None
+    # Keeping it for next time (the id of the kept answer, when done).
+    learning: asyncio.Task | None = None
 
 
 class Responder(Protocol):
@@ -83,6 +102,8 @@ class RuleResponder:
         self.agent.kb.model_access = self._kb_model
         self._gateway_checked: dict[str, float] = {}
         self._background: set[asyncio.Task] = set()
+        # Posted message id -> what it answered.
+        self._answered: TTLCache[Answered] = TTLCache(ANSWERED_KEPT, ANSWERED_TTL_SECONDS)
 
     async def _kb_model(self) -> tuple[ConfigSnapshot, LLMChat | None]:
         """The settings, and the model to index documents with when one is set up."""
@@ -389,6 +410,7 @@ class RuleResponder:
             IntegrationTools(
                 (spec for spec in snapshot.integrations.values() if spec.llm_tool),
                 message.template_vars(),
+                cache=self.agent.tool_results,
             )
         ]
         if snapshot.llm.format_for_rocketchat:
@@ -398,7 +420,13 @@ class RuleResponder:
                 return strip_thinking(text, partial=partial)
 
         turn = AgentTurn(
-            message, question, self._thread_for(message, snapshot), timer, live, intent=intent
+            message,
+            question,
+            self._thread_for(message, snapshot),
+            timer,
+            live,
+            intent=intent,
+            fresh=message.fresh,
         )
         try:
             result = await self.agent.answer(
@@ -485,10 +513,41 @@ class RuleResponder:
         reply.timer = timer
 
         async def on_sent(sent: bool) -> None:
+            if sent and reply.posted_id and result is not None and error is None:
+                if result.cached is not None or result.learning is not None:
+                    self._answered.put(
+                        reply.posted_id, Answered(message, result.cached, result.learning)
+                    )
             self._finish_turn(message, snapshot, timer, result, ack, sent=sent, error=error)
 
         reply.on_sent = on_sent
         return reply
+
+    async def downvoted(self, message_id: str) -> MessageContext | None:
+        """Someone reacted 👎 to the bot's message `message_id`.
+
+        A kept answer is dropped (a pinned one only counted), and the
+        question is returned to be answered again, afresh. An answer worked
+        out by the model is not kept for next time.
+        """
+        answered = self._answered.pop(message_id)
+        if answered is None:
+            return None
+        if answered.cached is not None:
+            await self.agent.answers.downvote(answered.cached.entry_id)
+            now = datetime.now(timezone.utc)
+            return dataclasses.replace(
+                answered.message, fresh=True, received_at=now, arrived=time.monotonic()
+            )
+        task = answered.learning
+        if task is not None:
+            try:
+                entry_id = await asyncio.wait_for(asyncio.shield(task), 30)
+            except (TimeoutError, asyncio.CancelledError, Exception):  # noqa: BLE001
+                entry_id = None
+            if entry_id is not None:
+                await self.agent.answers.downvote(entry_id)
+        return None
 
     def _finish_turn(
         self,
@@ -567,7 +626,7 @@ class RuleResponder:
                 usage = f"/{command.pattern} {spec.usage()}".strip()
                 raise IntegrationError(f"Usage: `{usage}`") from None
             result = await execute_integration(
-                spec, params=params, base_context=context
+                spec, params=params, base_context=context, cache=self.agent.tool_results
             )
             return result.text
 

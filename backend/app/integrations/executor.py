@@ -6,6 +6,7 @@ import asyncio
 import ipaddress
 import json
 import logging
+import hashlib
 import socket
 from dataclasses import dataclass, field
 from typing import Any
@@ -13,6 +14,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from app.cache.ttl import TTLCache
 from app.config import get_settings
 from app.integrations.templating import (
     TemplateRenderError,
@@ -65,6 +67,8 @@ class IntegrationSpec:
     timeout_seconds: float = 10.0
     params: list[ParamSpec] = field(default_factory=list)
     llm_tool: bool = False
+    # Successful answers are reused this long for the same request; 0 never.
+    cache_seconds: int = 0
 
     @classmethod
     def from_model(cls, model: Integration) -> IntegrationSpec:
@@ -85,6 +89,7 @@ class IntegrationSpec:
             auth_secret=decrypt_secret(model.auth_secret_enc),
             timeout_seconds=model.timeout_seconds or 10.0,
             llm_tool=bool(model.llm_tool),
+            cache_seconds=max(0, model.cache_seconds or 0),
             params=[
                 ParamSpec(
                     name=p.name,
@@ -138,6 +143,8 @@ class IntegrationResult:
     url: str | None = None
     error: str | None = None
     duration_ms: int | None = None
+    # Reused from an earlier identical request (`IntegrationSpec.cache_seconds`).
+    cached: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -277,8 +284,13 @@ async def execute_integration(
     base_context: dict[str, Any] | None = None,
     strict: bool = False,
     client: httpx.AsyncClient | None = None,
+    cache: TTLCache | None = None,
 ) -> IntegrationResult:
-    """Render the request from the spec, call it, and render the reply."""
+    """Render the request from the spec, call it, and render the reply.
+
+    With `cache` and a spec whose `cache_seconds` is set, a successful
+    result is kept and returned again for the same rendered request.
+    """
     method = spec.method.upper()
     if method not in ALLOWED_METHODS:
         raise IntegrationError(f"unsupported HTTP method: {spec.method}")
@@ -311,46 +323,70 @@ async def execute_integration(
             headers.setdefault("Content-Type", "text/plain; charset=utf-8")
             request_kwargs["headers"] = headers
 
-    owns_client = client is None
-    client = client or httpx.AsyncClient(
-        timeout=spec.timeout_seconds or get_settings().integration_timeout_seconds,
-        follow_redirects=False,
-    )
-    started = asyncio.get_running_loop().time()
-    try:
-        response = await client.request(method, url, **request_kwargs)
-    except httpx.HTTPError as exc:
-        raise IntegrationError(f"request to {url} failed: {exc}") from exc
-    finally:
-        if owns_client:
-            await client.aclose()
-    duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
+    key = None
+    if cache is not None and spec.cache_seconds > 0:
+        # The request as sent: the same key means the same call. Secrets in
+        # it stay in this process's memory. The reply is rendered afresh,
+        # since its template may use who is asking.
+        key = (
+            "integration",
+            hashlib.sha256(
+                json.dumps(
+                    [spec.id, method, url, request_kwargs.get("params"), headers, body_text],
+                    sort_keys=True,
+                    default=str,
+                ).encode()
+            ).hexdigest(),
+        )
+    hit = cache.get(key) if key is not None else None
+    if hit is not None:
+        status_code, raw, data, headers_out = hit
+        duration_ms = 0
+    else:
+        owns_client = client is None
+        client = client or httpx.AsyncClient(
+            timeout=spec.timeout_seconds or get_settings().integration_timeout_seconds,
+            follow_redirects=False,
+        )
+        started = asyncio.get_running_loop().time()
+        try:
+            response = await client.request(method, url, **request_kwargs)
+        except httpx.HTTPError as exc:
+            raise IntegrationError(f"request to {url} failed: {exc}") from exc
+        finally:
+            if owns_client:
+                await client.aclose()
+        duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
 
-    raw = response.text[: MAX_RESPONSE_CHARS * 4]
-    try:
-        data = response.json()
-    except ValueError:
-        data = None
+        status_code = response.status_code
+        raw = response.text[: MAX_RESPONSE_CHARS * 4]
+        try:
+            data = response.json()
+        except ValueError:
+            data = None
+        headers_out = dict(response.headers)
+        if key is not None and status_code < 400:
+            cache.put(key, (status_code, raw, data, headers_out), ttl=spec.cache_seconds)
 
     context.update(
         {
             "response": data,
             "body": raw,
-            "status": response.status_code,
-            "headers_out": dict(response.headers),
+            "status": status_code,
+            "headers_out": headers_out,
         }
     )
 
-    if response.status_code >= 400:
+    if status_code >= 400:
         detail = (raw or response.reason_phrase or "").strip()[:300]
         return IntegrationResult(
             ok=False,
-            text=f":warning: `{spec.name}` returned HTTP {response.status_code}"
+            text=f":warning: `{spec.name}` returned HTTP {status_code}"
             + (f"\n```\n{detail}\n```" if detail else ""),
-            status_code=response.status_code,
+            status_code=status_code,
             data=data,
             url=url,
-            error=f"HTTP {response.status_code}",
+            error=f"HTTP {status_code}",
             duration_ms=duration_ms,
         )
 
@@ -362,8 +398,9 @@ async def execute_integration(
     return IntegrationResult(
         ok=True,
         text=text[:MAX_RESPONSE_CHARS],
-        status_code=response.status_code,
+        status_code=status_code,
         data=data,
         url=url,
         duration_ms=duration_ms,
+        cached=hit is not None,
     )

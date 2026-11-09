@@ -12,6 +12,7 @@ from app.api import (
     access,
     agent,
     auth,
+    cache as cache_api,
     commands,
     config as config_api,
     integrations,
@@ -79,6 +80,7 @@ def create_app() -> FastAPI:
     app.include_router(agent.router)
     app.include_router(memory.router)
     app.include_router(knowledge.router)
+    app.include_router(cache_api.router)
     app.include_router(tasks.router)
     app.include_router(logs.router)
     app.include_router(access.router)

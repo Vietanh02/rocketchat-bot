@@ -185,7 +185,7 @@ async def test_integration_command_calls_the_api(app_env, gateway, monkeypatch):
 
     captured: dict = {}
 
-    async def fake_execute(spec, *, params, base_context=None, strict=False, client=None):
+    async def fake_execute(spec, *, params, base_context=None, strict=False, client=None, cache=None):
         from app.integrations.executor import IntegrationResult
 
         captured["params"] = params

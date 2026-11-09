@@ -21,6 +21,7 @@ const BLANK: IntegrationDraft = {
   timeout_seconds: 10,
   enabled: true,
   llm_tool: false,
+  cache_seconds: 0,
   params: [],
 };
 
@@ -165,6 +166,18 @@ export default function IntegrationsPage() {
                   step={0.5}
                   value={editing.draft.timeout_seconds}
                   onChange={(event) => patchDraft({ timeout_seconds: Number(event.target.value) })}
+                />
+              </Field>
+              <Field
+                label="Reuse answers for (seconds)"
+                hint="The same request within this time gets the last successful answer, without calling again. Only for calls that read, never ones that change something. 0: always call."
+              >
+                <input
+                  type="number"
+                  min={0}
+                  max={86400}
+                  value={editing.draft.cache_seconds}
+                  onChange={(event) => patchDraft({ cache_seconds: Number(event.target.value) })}
                 />
               </Field>
             </div>

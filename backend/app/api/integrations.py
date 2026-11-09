@@ -46,6 +46,7 @@ SCALAR_FIELDS = (
     "timeout_seconds",
     "enabled",
     "llm_tool",
+    "cache_seconds",
     *TEMPLATE_FIELDS,
 )
 

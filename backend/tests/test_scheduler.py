@@ -102,7 +102,7 @@ async def test_an_integration_task_posts_the_api_result(app_env, gateway, monkey
         await session.commit()
         integration_id = integration.id
 
-    async def fake_execute(spec, *, params, base_context=None, strict=False, client=None):
+    async def fake_execute(spec, *, params, base_context=None, strict=False, client=None, cache=None):
         from app.integrations.executor import IntegrationResult
 
         return IntegrationResult(ok=True, text=f"depth={params['env']}", status_code=200)

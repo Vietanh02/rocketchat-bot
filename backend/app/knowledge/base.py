@@ -28,6 +28,12 @@ documents first and the knowledge base when they have nothing. Word search
 search are merged by RRF; the language model then keeps the passages that
 actually answer, best first; and each is shown with its neighbours in the
 same section, again as one exact slice of the document.
+
+Lookups and searches are kept for a few minutes (`RESULTS_TTL_SECONDS`),
+so the same question asked again skips the search and the model's
+choosing. `version` counts changes to the documents; any change empties
+that cache, and `base_version` tells the saved answers (`app.cache.answers`)
+when the knowledge base they came from has changed.
 """
 
 from __future__ import annotations
@@ -41,7 +47,7 @@ import re
 import shutil
 import time
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path, PurePath
 from typing import TYPE_CHECKING
@@ -50,6 +56,7 @@ from sqlalchemy import bindparam, delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.config_store import EmbeddingSettings
+from app.cache.ttl import TTLCache
 from app.config import get_settings
 from app.knowledge.chunking import Block, Section, Span, chunk_pages, pack
 from app.knowledge.embeddings import EmbeddingError, model_tag
@@ -84,6 +91,9 @@ INDEX_RETRY_SECONDS = 60.0
 PARSE_SLOTS = 2
 # Word search weights: text, section title, keywords, questions, summary.
 BM25_WEIGHTS = "1.0, 4.0, 2.5, 2.0, 1.0"
+# Lookups and searches kept for the same question, and for how long.
+RESULTS_CACHED = 256
+RESULTS_TTL_SECONDS = 600.0
 
 ModelAccess = Callable[[], Awaitable["tuple[ConfigSnapshot, LLMChat | None]"]]
 
@@ -210,6 +220,38 @@ class KnowledgeBase:
         self._index_retry_at = 0.0
         self._pipeline_task: asyncio.Task | None = None
         self._pipeline_again = False
+        # Counts changes to documents, passages and vectors, in this process.
+        self.version = 0
+        self.results: TTLCache = TTLCache(RESULTS_CACHED, RESULTS_TTL_SECONDS)
+        self._base_version: tuple[int, str] | None = None
+
+    def changed(self) -> None:
+        """The documents changed: what was found before may be wrong now."""
+        self.version += 1
+        self.results.clear()
+
+    async def base_version(self) -> str:
+        """A fingerprint of the knowledge base's documents; it changes whenever they do."""
+        if self._base_version is not None and self._base_version[0] == self.version:
+            return self._base_version[1]
+        version = self.version
+        async with self._session_factory() as db:
+            row = (
+                await db.execute(
+                    select(
+                        func.count(KbDocument.id),
+                        func.coalesce(func.sum(KbDocument.id), 0),
+                        func.max(KbDocument.updated_at),
+                        func.max(KbSource.updated_at),
+                    )
+                    .select_from(KbDocument)
+                    .outerjoin(KbSource, KbSource.document_id == KbDocument.id)
+                    .where(KbDocument.scope == BASE_SCOPE)
+                )
+            ).one()
+        fingerprint = hashlib.sha256(repr(tuple(row)).encode()).hexdigest()[:16]
+        self._base_version = (version, fingerprint)
+        return fingerprint
 
     @property
     def files_dir(self) -> Path:
@@ -306,6 +348,7 @@ class KnowledgeBase:
         log.info(
             "Added %s to %s: %d characters, %d passages", filename, scope, len(body), len(spans)
         )
+        self.changed()
         self.ensure_pipeline()
         self._indexed_tag = None
         self._index_retry_at = 0.0
@@ -352,6 +395,7 @@ class KnowledgeBase:
             await db.execute(delete(KbSource).where(KbSource.document_id == document_id))
             await db.delete(row)
             await db.commit()
+        self.changed()
         await self._drop_vectors(ids)
         await self._drop_files([document_id])
         return gone
@@ -369,6 +413,7 @@ class KnowledgeBase:
             await db.execute(delete(KbSource).where(KbSource.document_id.in_(documents)))
             await db.execute(delete(KbDocument).where(KbDocument.scope == scope))
             await db.commit()
+        self.changed()
         await self._drop_vectors(ids)
         await self._drop_files(documents)
         return len(documents)
@@ -565,6 +610,7 @@ class KnowledgeBase:
                 )
             )
             await db.commit()
+        self.changed()
         await self._drop_vectors(old_ids)
         log.info(
             "Indexed %r with the language model in %.1fs: %d sections, %d passages",
@@ -598,6 +644,42 @@ class KnowledgeBase:
         nothing gets the beginning of the latest one instead.
         """
         present = await self.scopes_with_documents([conversation, BASE_SCOPE])
+        # A conversation without documents of its own looks in the base like any other.
+        key = (
+            "lookup",
+            _query_key(question),
+            conversation if conversation in present else None,
+            BASE_SCOPE in present,
+            embedding,
+            limit,
+            min_score,
+            about_document,
+            judge_with[1] if judge_with else False,
+        )
+        cached = self.results.get(key)
+        if cached is not None:
+            return Lookup(list(cached.passages), cached.source, present, cached.judged)
+        degraded: list[bool] = []
+        found = await self._lookup(
+            question, conversation, present, embedding, limit, min_score, about_document, judge_with, degraded
+        )
+        # A search that fell back to words only is not kept: the next may do better.
+        if not degraded and found.passages:
+            self.results.put(key, Lookup(list(found.passages), found.source, set(), found.judged))
+        return found
+
+    async def _lookup(
+        self,
+        question: str,
+        conversation: str,
+        present: set[str],
+        embedding: EmbeddingSettings,
+        limit: int,
+        min_score: float,
+        about_document: bool,
+        judge_with: tuple[LLMChat, str | None] | None,
+        degraded: list[bool],
+    ) -> Lookup:
         for scope, source in ((conversation, "conversation"), (BASE_SCOPE, "base")):
             if scope not in present:
                 continue
@@ -607,6 +689,7 @@ class KnowledgeBase:
                 embedding=embedding,
                 limit=max(limit, JUDGE_CANDIDATES) if judge_with else limit,
                 min_score=min_score,
+                degraded=degraded,
             )
             judged = False
             if found and judge_with is not None:
@@ -614,6 +697,8 @@ class KnowledgeBase:
                 picked = await judge(chat, question, [(p.label, p.shown) for p in found], model=model)
                 if picked is not None:
                     found, judged = [found[i] for i in picked], True
+                else:
+                    degraded.append(True)
             if found:
                 return Lookup(await self.expand(found[:limit]), source, present, judged)
             if scope == conversation and about_document:
@@ -628,9 +713,32 @@ class KnowledgeBase:
         embedding: EmbeddingSettings,
         limit: int = 5,
         min_score: float | None = None,
+        degraded: list[bool] | None = None,
+    ) -> list[Passage]:
+        key = ("search", _query_key(query), tuple(sorted(scopes)), embedding, limit, min_score)
+        cached = self.results.get(key)
+        if cached is not None:
+            return [replace(p) for p in cached]
+        failed: list[bool] = []
+        found = await self._search(query, scopes, embedding, limit, min_score, failed)
+        if failed:
+            if degraded is not None:
+                degraded.append(True)
+        elif found:
+            self.results.put(key, [replace(p) for p in found])
+        return found
+
+    async def _search(
+        self,
+        query: str,
+        scopes: Sequence[str],
+        embedding: EmbeddingSettings,
+        limit: int,
+        min_score: float | None,
+        failed: list[bool],
     ) -> list[Passage]:
         dense, words = await asyncio.gather(
-            self._dense(query, scopes, embedding, min_score), self._words(query, scopes)
+            self._dense(query, scopes, embedding, min_score, failed), self._words(query, scopes)
         )
         scores = dict(rrf([dense, words]))
         merged = list(scores)[:CANDIDATES]
@@ -646,6 +754,7 @@ class KnowledgeBase:
                 reranked = await reranker.rerank(query, [p.shown for p in passages])
             except EmbeddingError as exc:
                 log.warning("Reranking passages failed, keeping the merged order: %s", exc)
+                failed.append(True)
             else:
                 for passage, score in zip(passages, reranked, strict=True):
                     passage.score = score
@@ -727,6 +836,7 @@ class KnowledgeBase:
         scopes: Sequence[str],
         embedding: EmbeddingSettings,
         min_score: float | None,
+        failed: list[bool] | None = None,
     ) -> list[int]:
         vectors = self.knowledge.vectors_for(embedding)
         if vectors is None:
@@ -743,6 +853,8 @@ class KnowledgeBase:
             )
         except (EmbeddingError, VectorStoreError) as exc:
             log.warning("Searching documents by meaning failed, using words only: %s", exc)
+            if failed is not None:
+                failed.append(True)
             return []
         # A passage may be found through itself and through its questions; once is enough.
         ranked: list[int] = []
@@ -865,6 +977,7 @@ class KnowledgeBase:
                     .values(embedded_model=tag)
                 )
                 await db.commit()
+            self.changed()
             done += len(rows)
         self._indexed_tag = tag
         return done
@@ -882,6 +995,11 @@ class KnowledgeBase:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
+
+
+def _query_key(text: str) -> str:
+    """The question as the caches see it: case and spacing do not matter."""
+    return " ".join(text.casefold().split())
 
 
 def _passage(row: KbPassage, title: str) -> Passage:

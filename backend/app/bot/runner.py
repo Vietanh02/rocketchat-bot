@@ -7,6 +7,10 @@ per (room, sender): each lane is handled in order, and up to
 delays only that user's next message, and one user can never take more than
 one slot. Every handled message is written to `message_log` for the portal's
 Logs page.
+
+The bot's own messages come back on the stream when someone reacts to them.
+A 👎 on an answer the bot gave from its kept answers drops that answer and
+asks the question again, worked out afresh.
 """
 
 from __future__ import annotations
@@ -34,6 +38,8 @@ from app.scheduler.service import SchedulerService
 log = logging.getLogger(__name__)
 
 SEEN_CACHE_SIZE = 512
+# Reactions that say an answer was wrong.
+DOWNVOTES = frozenset({":thumbsdown:", ":-1:", ":thumbs_down:"})
 # Messages one user may have waiting in a room; more are dropped as spam.
 MAX_LANE_BACKLOG = 20
 
@@ -222,6 +228,10 @@ class BotService:
     # ----------------------------------------------------------------- #
 
     async def _enqueue(self, message: IncomingMessage) -> None:
+        if message.sender_id and message.sender_id == self._bot_user_id:
+            if message.raw.get("reactions"):
+                self._on_reactions(message)
+            return
         if not self._is_actionable(message):
             return
         try:
@@ -304,19 +314,49 @@ class BotService:
                 return
             await asyncio.gather(*pending, return_exceptions=True)
 
+    def _on_reactions(self, message: IncomingMessage) -> None:
+        """Someone reacted to one of the bot's messages."""
+        if not downvoters(message.raw.get("reactions"), self._bot_username):
+            return
+        downvoted = getattr(self.responder, "downvoted", None)
+        if downvoted is None:
+            return
+
+        async def answer_again() -> None:
+            try:
+                context = await downvoted(message.message_id)
+                if context is None:
+                    return
+                log.info("👎 on %s: answering %s again", message.message_id, context.message_id)
+                async with self._slots:
+                    self._active += 1
+                    try:
+                        await self._handle_context(context)
+                    finally:
+                        self._active -= 1
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - only a reaction
+                log.exception("Could not act on the 👎 on %s", message.message_id)
+
+        task = asyncio.create_task(answer_again(), name=f"bot-downvote-{message.message_id}")
+        self._lane_tasks.add(task)
+        task.add_done_callback(self._lane_tasks.discard)
+
     async def _handle(self, message: IncomingMessage) -> None:
-        started = datetime.now(timezone.utc)
-        context = MessageContext.from_incoming(
-            message, bot_username=self._bot_username
+        await self._handle_context(
+            MessageContext.from_incoming(message, bot_username=self._bot_username)
         )
 
+    async def _handle_context(self, context: MessageContext) -> None:
+        started = datetime.now(timezone.utc)
         reply: Reply | None = None
         status, error = "ignored", None
         try:
             reply = await self.responder.respond(context)
         except Exception as exc:  # noqa: BLE001 - logged, and the user is told
             status, error = "error", str(exc)
-            log.exception("Responder failed for %s", message.message_id)
+            log.exception("Responder failed for %s", context.message_id)
             reply = Reply(text=":warning: Something went wrong handling that.")
 
         sent = False
@@ -326,10 +366,10 @@ class BotService:
             try:
                 if reply.timer is not None:
                     with reply.timer.waiting("rc"):
-                        await self._send(context, reply)
+                        reply.posted_id = await self._send(context, reply)
                     reply.timer.mark("delivered")
                 else:
-                    await self._send(context, reply)
+                    reply.posted_id = await self._send(context, reply)
                 sent = True
                 self._handled += 1
                 status = "error" if reply.error else "ok"
@@ -343,20 +383,21 @@ class BotService:
         duration_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
         await self._log(context, reply, status, error, duration_ms)
 
-    async def _send(self, context: MessageContext, reply: Reply) -> None:
+    async def _send(self, context: MessageContext, reply: Reply) -> str | None:
+        """Post the reply; the id of its (last) message."""
         if self._gateway is None:
             raise RocketChatError("not connected to Rocket.Chat")
         if reply.live is not None:
-            await reply.live.finish(reply.text)
-            return
+            return (await reply.live.finish(reply.text)).message_id
         snapshot = await self._config_store.current()
-        await deliver(
+        sent = await deliver(
             self._gateway,
             reply.room_id or context.room_id,
             reply.text,
             thread_id=reply.thread_id,
             options=DeliveryOptions.from_settings(snapshot.settings),
         )
+        return sent.message_id
 
     async def _log(
         self,
@@ -383,3 +424,17 @@ class BotService:
                 )
             )
             await session.commit()
+
+
+def downvoters(reactions: object, bot_username: str | None) -> list[str]:
+    """Who reacted 👎, other than the bot, in a message's `reactions`."""
+    if not isinstance(reactions, dict):
+        return []
+    people: list[str] = []
+    for emoji, detail in reactions.items():
+        if emoji not in DOWNVOTES or not isinstance(detail, dict):
+            continue
+        for name in detail.get("usernames") or []:
+            if isinstance(name, str) and name != bot_username and name not in people:
+                people.append(name)
+    return people

@@ -43,19 +43,27 @@ class FakeModel:
         # so documents keep their heading cut and search keeps its order.
         self.on_index = lambda body: '{"sections": []}'
         self.on_judge = lambda body: "unsure"
+        # Asked to keep an answer for next time; by default nothing is kept.
+        self.on_learn = lambda body: '{"reusable": false}'
         # Seconds between streamed pieces, as a real model takes; 0 sends all at once.
         self.token_delay = 0.0
 
     # Background work for the knowledge base, answered apart from the chat.
     INDEX_PROMPT = "You index a document"
     JUDGE_PROMPT = "You check search results"
+    LEARN_PROMPT = "You prepare an answer to keep"
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         system = next((m.get("content") or "" for m in body.get("messages", []) if m.get("role") == "system"), "")
-        if system.startswith((self.INDEX_PROMPT, self.JUDGE_PROMPT)):
+        if system.startswith((self.INDEX_PROMPT, self.JUDGE_PROMPT, self.LEARN_PROMPT)):
             self.side_requests.append(body)
-            handler = self.on_index if system.startswith(self.INDEX_PROMPT) else self.on_judge
+            if system.startswith(self.INDEX_PROMPT):
+                handler = self.on_index
+            elif system.startswith(self.JUDGE_PROMPT):
+                handler = self.on_judge
+            else:
+                handler = self.on_learn
             return _completion(body, handler(body))
         self.requests.append(body)
         self.headers.append(request.headers)

@@ -193,6 +193,8 @@ export interface Integration {
   timeout_seconds: number;
   enabled: boolean;
   llm_tool: boolean;
+  /** Reuse a successful answer this long for the same request; 0 never. */
+  cache_seconds: number;
   has_secret: boolean;
   params: IntegrationParam[];
   created_at: string;
@@ -512,4 +514,55 @@ export interface KbStatus {
   pending: number;
   semantic: boolean;
   stages: Record<string, number>;
+}
+
+export interface CacheConfig {
+  answer_cache: boolean;
+  answer_min_similarity: number;
+  pinned_min_similarity: number;
+  answer_ttl_hours: number;
+}
+
+export interface AnswerSource {
+  number: number;
+  label: string;
+}
+
+export interface AnswerEntry {
+  id: number;
+  kind: "auto" | "pinned";
+  question: string;
+  alternatives: string[];
+  answer: string;
+  sources: AnswerSource[];
+  hits: number;
+  downvotes: number;
+  last_hit_at: string | null;
+  expires_at: string | null;
+  created_by: string | null;
+  created_at: string;
+  embedded: boolean;
+}
+
+export interface AnswerEntryDraft {
+  question: string;
+  alternatives: string[];
+  answer: string;
+}
+
+export interface CacheStats {
+  saved: number;
+  pinned: number;
+  served: number;
+  lookups: { entries: number; hits: number; misses: number };
+  tool_results: { entries: number; hits: number; misses: number };
+}
+
+export interface CacheTestResult {
+  found: boolean;
+  entry_id: number | null;
+  kind: string | null;
+  matched_by: string | null;
+  score: number | null;
+  reply: string | null;
 }

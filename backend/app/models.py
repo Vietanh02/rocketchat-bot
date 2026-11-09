@@ -272,6 +272,9 @@ class Integration(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     # Offered to the language model as a tool it may call on its own.
     llm_tool: Mapped[bool] = mapped_column(Boolean, default=False)
+    # A successful answer is reused this many seconds for the same request,
+    # by commands and the model alike; 0 never. Only for read-only calls.
+    cache_seconds: Mapped[int] = mapped_column(Integer, default=0)
 
     commands: Mapped[list[Command]] = relationship(back_populates="integration")
     params: Mapped[list[IntegrationParam]] = relationship(
@@ -691,6 +694,15 @@ class KnowledgeConfig(Base, TimestampMixin):
     llm_judge: Mapped[bool] = mapped_column(Boolean, default=True)
     # The model for both; empty uses the fast model, else the main one.
     index_model: Mapped[str] = mapped_column(String(256), default="")
+    # Answers to knowledge-base questions are saved and given again to the
+    # same question (`AnswerEntry`). Pinned answers are given either way.
+    answer_cache: Mapped[bool] = mapped_column(Boolean, default=True)
+    # How similar (cosine) a question must be to a saved one to get its
+    # answer; pinned answers have their own, usually lower, bar.
+    answer_min_similarity: Mapped[float] = mapped_column(Float, default=0.95)
+    pinned_min_similarity: Mapped[float] = mapped_column(Float, default=0.9)
+    # How long a saved answer is given before it is worked out again.
+    answer_ttl_hours: Mapped[int] = mapped_column(Integer, default=168)
 
 
 class KbDocument(Base, TimestampMixin):
@@ -809,3 +821,65 @@ event.listen(
     "before_drop",
     DDL("DROP TABLE IF EXISTS kb_passage_fts").execute_if(dialect="sqlite"),
 )
+
+
+class AnswerKind(str, enum.Enum):
+    # Saved after the assistant answered from the knowledge base.
+    auto = "auto"
+    # Written (or kept) by an admin; given until changed or removed.
+    pinned = "pinned"
+
+
+class AnswerEntry(Base, TimestampMixin):
+    """An answer given again, without the model, to the same question.
+
+    Saved answers ("auto") come from turns that only used the knowledge
+    base. The fast model rewrites the question to stand on its own and
+    answers it from the passages alone, so the saved answer holds nothing
+    of the person who asked. One is dropped when the knowledge base changes
+    (`kb_version`), when it expires, or when someone reacts 👎 to it.
+    """
+
+    __tablename__ = "answer_entry"
+    # Ids are never reused: a 👎 on an old reply must not reach a new entry.
+    __table_args__ = {"sqlite_autoincrement": True}
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(8), default=AnswerKind.auto.value, index=True)
+    question: Mapped[str] = mapped_column(Text)
+    answer: Mapped[str] = mapped_column(Text)
+    # JSON list of the cited sources' labels, in citation order.
+    sources_json: Mapped[str] = mapped_column(Text, default="[]")
+    # The documents it was answered from.
+    scope: Mapped[str] = mapped_column(String(300), default="base")
+    # `KnowledgeBase.base_version()` when it was saved.
+    kb_version: Mapped[str] = mapped_column(String(32), default="")
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    hits: Mapped[int] = mapped_column(Integer, default=0)
+    last_hit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 👎 reactions; a saved answer goes at the first, a pinned one stays.
+    downvotes: Mapped[int] = mapped_column(Integer, default=0)
+    created_by: Mapped[str | None] = mapped_column(String(128))
+
+    keys: Mapped[list[AnswerKey]] = relationship(
+        back_populates="entry", cascade="all, delete-orphan", order_by="AnswerKey.id"
+    )
+
+
+class AnswerKey(Base):
+    """One way of asking an `AnswerEntry`'s question; each gets a vector."""
+
+    __tablename__ = "answer_key"
+    # Ids are vector ids too; never reused.
+    __table_args__ = {"sqlite_autoincrement": True}
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    entry_id: Mapped[int] = mapped_column(
+        ForeignKey("answer_entry.id", ondelete="CASCADE"), index=True
+    )
+    text: Mapped[str] = mapped_column(Text)
+    # sha256 of the question with case and spacing folded, for exact matches.
+    text_hash: Mapped[str] = mapped_column(String(64), index=True)
+    embedded_model: Mapped[str] = mapped_column(String(64), default="", index=True)
+
+    entry: Mapped[AnswerEntry] = relationship(back_populates="keys")

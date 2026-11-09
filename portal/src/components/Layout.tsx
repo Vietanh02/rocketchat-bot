@@ -12,6 +12,7 @@ const NAV = [
   { to: "/assistant", label: "Assistant" },
   { to: "/memory", label: "Memory" },
   { to: "/knowledge", label: "Knowledge base" },
+  { to: "/cache", label: "Cache" },
   { to: "/tasks", label: "Reminders" },
   { to: "/access", label: "Access" },
   { to: "/logs", label: "Logs" },
