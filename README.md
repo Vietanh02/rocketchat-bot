@@ -70,7 +70,9 @@ cd .. && cp backend/.env.example backend/.env   # set APP_SECRET_KEY!
 docker compose up -d --build
 ```
 
-The portal is then at <http://localhost:8080>. Log in with
+The portal is then at <http://localhost:8081> (`PORTAL_PORT` changes it). For a full
+deployment guide (in Vietnamese: requirements, configuration order, backups, upgrades,
+release packages, troubleshooting) see [DEPLOY.md](DEPLOY.md). Log in with
 `APP_BOOTSTRAP_ADMIN_EMAIL` / `APP_BOOTSTRAP_ADMIN_PASSWORD`, open **Bot settings**, paste the
 bot's user ID and access token, press **Test connection**, then **Save & reconnect**. The
 sidebar dot turns green when the bot is listening.
@@ -103,7 +105,7 @@ cd portal && npm install && npm run dev   # http://localhost:5173, proxies /api 
 Tests:
 
 ```bash
-cd backend && .venv/bin/python -m pytest -q      # 317 tests, no network or Rocket.Chat needed
+cd backend && .venv/bin/python -m pytest -q      # 565 tests, no network or Rocket.Chat needed
 ```
 
 ## Configuring the bot
@@ -311,32 +313,12 @@ cd backend && .venv/bin/alembic upgrade head
 All instants are stored in UTC — SQLite silently drops timezone offsets, so `app/timeutil.py`
 normalises on the way in and converts to the task's own timezone for display.
 
-## Known issues in `rocketchat_server/docker-compose.yml`
+## Rocket.Chat stack (`rocketchat_server/`)
 
-Two problems in the pre-existing Rocket.Chat stack, found while testing against it:
-
-1. **The replica set is never initiated.** Rocket.Chat crash-loops with
-   `Topology is closed` until you run the `rs.initiate(...)` command in step 2 above. Worth
-   adding as a one-shot init service so a fresh `up` just works.
-
-2. **MongoDB's data is not actually persisted.** The compose file mounts
-   `./mongo_data:/var/lib/mongo`, but this image stores its data in `/data/db` — the host
-   directory stays empty and everything lives in the container's writable layer, so
-   `docker compose down` destroys the workspace. The fix is:
-
-   ```yaml
-   volumes:
-     - ./mongo_data:/data/db
-   ```
-
-   Changing it points Mongo at an empty directory, so the existing workspace would look
-   freshly installed. Copy the data across first if you want to keep it:
-
-   ```bash
-   docker compose cp mongodb:/data/db/. ./mongo_data/
-   ```
-
-   This was left unchanged because fixing it in place is destructive — it is your call.
+The Mongo healthcheck initiates the `rs0` replica set on an empty data folder, and Rocket.Chat
+waits for it, so a fresh `docker compose up -d` works without the manual `rs.initiate` above
+(it is harmless on a set that already exists). Mongo keeps its data in `./mongo_data`
+(mounted at `/data/db`; the folder must belong to uid 1000).
 
 ## API
 

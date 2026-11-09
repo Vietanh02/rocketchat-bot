@@ -26,6 +26,7 @@ from app.api import (
     skills as skills_api,
     tasks,
 )
+from app import __version__
 from app.bootstrap import run_bootstrap
 from app.config import get_settings
 from app.db import SessionLocal
@@ -99,6 +100,7 @@ def create_app() -> FastAPI:
         runtime: Runtime | None = getattr(app.state, "runtime", None)
         return {
             "status": "ok",
+            "version": __version__,
             "bot_connected": bool(runtime and runtime.bot.status.connected),
             "scheduler_running": bool(runtime and runtime.scheduler.running),
         }

@@ -9,6 +9,9 @@
 services:
   backend:
     build: ./backend
+    # Named, so images loaded from a release package are used as they are
+    # (`docker compose up -d --no-build`). BOT_VERSION defaults to "latest".
+    image: rocketchat-bot-backend:${BOT_VERSION:-latest}
     restart: unless-stopped
     env_file:
       # Optional: copy backend/.env.example to backend/.env to use it.
@@ -78,6 +81,7 @@ services:
 
   portal:
     build: ./portal
+    image: rocketchat-bot-portal:${BOT_VERSION:-latest}
     restart: unless-stopped
     depends_on:
       - backend

@@ -17,3 +17,6 @@ rocketchat_server/mongo_data/
 # Local scratch
 *.log
 backend/rocketchat_bot.egg-info/
+
+# Release packages made by deploy/package.sh
+release/
