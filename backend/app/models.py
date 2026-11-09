@@ -738,8 +738,12 @@ class KbDocument(Base, TimestampMixin):
     chunks: Mapped[int] = mapped_column(Integer, default=0)
     chars: Mapped[int] = mapped_column(Integer, default=0)
     truncated: Mapped[bool] = mapped_column(Boolean, default=False)
-    source: Mapped[str] = mapped_column(String(16), default="portal")  # portal|chat
+    source: Mapped[str] = mapped_column(String(16), default="portal")  # portal|chat|folder
     uploaded_by: Mapped[str | None] = mapped_column(String(255))
+    # Imported folders (`app.knowledge.folder`): the import's name, and the
+    # file's path in it, by which a later import of the folder updates it.
+    collection: Mapped[str | None] = mapped_column(String(100), index=True)
+    source_path: Mapped[str | None] = mapped_column(Text)
 
 
 class KbSource(Base):

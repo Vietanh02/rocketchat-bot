@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import type { KbDocument, KbSearchResult, KbUploadResult, KnowledgeConfig } from "../api/types";
 import { useAuth } from "../auth";
+import ImportCard from "../components/ImportCard";
 import { Banner, Card, Checkbox, Empty, Field, Loading, Pill, Stat } from "../components/ui";
 import { formatDateTime } from "../format";
 import { errorMessage, usePoll, useResource } from "../hooks";
@@ -154,6 +155,8 @@ export default function KnowledgePage() {
       <BehaviourCard isAdmin={isAdmin} onNotice={setNotice} />
 
       {isAdmin && <UploadCard onUploaded={refresh} />}
+
+      <ImportCard isAdmin={isAdmin} onImported={refresh} />
 
       <Card title="Documents">
         <DocumentTable

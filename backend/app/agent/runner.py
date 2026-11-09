@@ -54,6 +54,7 @@ from app.cache.ttl import TTLCache
 from app.bot.rcformat import strip_thinking
 from app.bot.types import MessageContext
 from app.knowledge.base import BASE_SCOPE, KnowledgeBase, Lookup, Passage, conversation_scope
+from app.knowledge.folder import FolderImporter
 from app.knowledge.service import KnowledgeService
 from app.models import AgentRun, QueueMode
 
@@ -137,6 +138,8 @@ class AgentRunner:
         self.memory = MemoryStore(session_factory, self.knowledge)
         self.profiles = ProfileStore(session_factory)
         self.kb = KnowledgeBase(session_factory, self.knowledge)
+        # Whole folders (a Confluence export) imported into the knowledge base.
+        self.imports = FolderImporter(self.kb)
         self.answers = AnswerCache(session_factory, self.knowledge, self.kb)
         self.skills = SkillCatalog(session_factory)
         # Results of integrations whose answers may be reused (`cache_seconds`).
@@ -722,6 +725,7 @@ class AgentRunner:
         if self.jobs is not None:
             await self.jobs.close()
         await self.answers.close()
+        await self.imports.close()
         await self.memory.close()
         await self.kb.close()
         await self.knowledge.aclose()

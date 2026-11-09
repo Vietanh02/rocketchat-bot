@@ -1,4 +1,4 @@
-# Hướng dẫn triển khai Rocket.Chat bot — phiên bản 0.6.0
+# Hướng dẫn triển khai Rocket.Chat bot — phiên bản 0.6.1
 
 Tài liệu này hướng dẫn cài bot lên một máy mới, cấu hình nó, rồi nâng cấp, sao lưu và đóng gói các phiên bản sau.
 Phần mô tả tính năng nằm trong [README.md](README.md).
@@ -48,11 +48,11 @@ git checkout release/v0.6.0
 
 ### Cách B — từ gói phát hành
 
-Gói `rocketchat-bot-0.6.0.tar` do `deploy/package.sh` tạo ra (xem mục 9). Bên trong có:
+Gói `rocketchat-bot-0.6.1.tar` do `deploy/package.sh` tạo ra (xem mục 9). Bên trong có:
 
 ```
-rocketchat-bot-0.6.0/
-  rocketchat-bot-0.6.0-source.tar.gz   mã nguồn (giải nén ra rocketchat-bot/)
+rocketchat-bot-0.6.1/
+  rocketchat-bot-0.6.1-source.tar.gz   mã nguồn (giải nén ra rocketchat-bot/)
   images/backend.tar.gz                image backend
   images/portal.tar.gz                 image portal
   images/qdrant_qdrant_v1.19.2.tar.gz  (khi đóng gói với --with-deps)
@@ -60,13 +60,13 @@ rocketchat-bot-0.6.0/
 ```
 
 ```bash
-tar -xf rocketchat-bot-0.6.0.tar
-cd rocketchat-bot-0.6.0
+tar -xf rocketchat-bot-0.6.1.tar
+cd rocketchat-bot-0.6.1
 sha256sum -c SHA256SUMS                       # mọi dòng phải là OK
 for f in images/*.tar.gz; do gunzip -c "$f" | docker load; done
-sudo tar -xzf rocketchat-bot-0.6.0-source.tar.gz -C /opt   # mã nguồn → /opt/rocketchat-bot
+sudo tar -xzf rocketchat-bot-0.6.1-source.tar.gz -C /opt   # mã nguồn → /opt/rocketchat-bot
 cd /opt/rocketchat-bot
-export BOT_VERSION=0.6.0                      # dùng image vừa nạp, không build lại
+export BOT_VERSION=0.6.1                      # dùng image vừa nạp, không build lại
 ```
 
 Ở các bước sau, thay `docker compose up -d --build` bằng `docker compose up -d --no-build`.
@@ -116,7 +116,7 @@ Các biến `APP_RC_*` và `APP_LLM_*` có thể để trống; nhập trên por
 ```bash
 docker compose up -d --build            # cách B: docker compose up -d --no-build
 docker compose ps
-curl -s http://localhost:8081/healthz   # {"status":"ok","version":"0.6.0",...}
+curl -s http://localhost:8081/healthz   # {"status":"ok","version":"0.6.1",...}
 docker compose logs -f backend          # Ctrl+C để thoát
 ```
 
@@ -182,6 +182,37 @@ Image backend chỉ có Python. MCP server kiểu stdio viết bằng Node (`npx
 ### 8.3 Thêm skill
 Chép thư mục skill vào `skills/<tên>/` (xem mẫu `skills/_example`), rồi bấm **Look again** trên trang Skills.
 Thư mục được mount chỉ đọc. Không cần khởi động lại.
+
+### 8.4 Nạp cả một thư mục vào knowledge base (ví dụ space Confluence)
+
+Export space trên máy của bạn bằng [confluence-markdown-exporter](https://github.com/Spenhouet/confluence-markdown-exporter):
+
+```bash
+pip install confluence-markdown-exporter
+cme spaces https://<công-ty>.atlassian.net/wiki/spaces/<SPACEKEY>    # Server: https://wiki.<công-ty>/display/<SPACEKEY>
+```
+
+Kết quả là thư mục `<Tên space>/`: mỗi trang là một file `.md`, xếp theo cây trang; file đính kèm nằm trong `attachments/`.
+Có hai cách đưa thư mục này vào bot:
+
+- **ZIP (đơn giản nhất):** nén thư mục, vào portal → Knowledge base → **Import a folder** → *Upload a ZIP* → **Import the ZIP**. Tối đa 1 GB.
+- **Chép lên server** (khi bản export lớn):
+  ```bash
+  rsync -a "./<Tên space>/" server:/đường/dẫn/repo/kb_import/<SPACEKEY>/
+  ```
+  Sau đó vào portal → Import a folder → *Or a folder on the server*, chọn thư mục → **Import the folder**.
+  Thư mục `kb_import/` được mount chỉ đọc vào backend tại `/app/kb_import`.
+
+Mỗi lần nạp tạo (hoặc cập nhật) một **collection**:
+
+- Tên trang lấy từ H1. Link nội bộ được giữ lại phần chữ. Ảnh, `*.comments.md` và `confluence-lock.json` bị bỏ qua.
+- File đính kèm (PDF, Word…) chỉ được nạp khi tick *Include attachments*. Tên của chúng lấy từ chữ của link trong trang trỏ tới file.
+- **Nạp lại với cùng tên collection sẽ đồng bộ:** trang không đổi thì bỏ qua, trang đã sửa thì thay, trang đã bị xoá khỏi export thì xoá khỏi KB (nếu tick *Remove pages no longer in the folder*).
+  Để cập nhật hằng tuần: export lại, rồi nạp lại.
+- **Index with the language model:** model chia từng trang thành các section và viết từ khoá cùng câu hỏi thường gặp, giúp tra cứu tốt hơn.
+  Mỗi trang mất vài chục giây, nên một space vài trăm trang sẽ chạy nền vài giờ. Trong lúc đó các trang vẫn tra cứu được ngay theo heading và vector.
+  Bỏ tick nếu cần nạp nhanh; có thể bấm **Index again** cho từng tài liệu sau.
+- Xoá cả collection: nút **Remove** trong bảng Collections.
 
 ## 9. Đóng gói một phiên bản
 

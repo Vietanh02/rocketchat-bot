@@ -831,6 +831,9 @@ class KbDocumentOut(BaseModel):
     sections: int = 0
     # Passages without a vector of the current model yet.
     pending: int = 0
+    # Set for documents imported from a folder.
+    collection: str | None = None
+    source_path: str | None = None
 
 
 class KbUploadResult(BaseModel):
@@ -1113,3 +1116,60 @@ class SkillDetailOut(SkillOut):
 
 class SkillUpdate(BaseModel):
     enabled: bool
+
+
+# --------------------------------------------------------------------------- #
+# Folder imports
+# --------------------------------------------------------------------------- #
+
+
+class ImportFailureOut(BaseModel):
+    path: str
+    error: str
+
+
+class ImportReportOut(BaseModel):
+    id: int
+    collection: str
+    # "upload: export.zip" or "folder: confluence".
+    origin: str
+    status: Literal["running", "done", "failed"]
+    total: int
+    done: int
+    added: int
+    updated: int
+    unchanged: int
+    removed: int
+    duplicates: int
+    skipped: int
+    failures: list[ImportFailureOut]
+    error: str | None = None
+    started_at: datetime
+    ended_at: datetime | None = None
+
+
+class KbCollectionOut(BaseModel):
+    name: str
+    documents: int
+    passages: int
+
+
+class ServerFolderOut(BaseModel):
+    name: str
+    files: int
+
+
+class ImportsOut(BaseModel):
+    # Where folders copied to the server are looked for.
+    import_dir: str
+    folders: list[ServerFolderOut]
+    collections: list[KbCollectionOut]
+    imports: list[ImportReportOut]
+
+
+class FolderImportIn(BaseModel):
+    folder: str = Field(min_length=1, max_length=255)
+    collection: str | None = Field(default=None, max_length=60)
+    model_index: bool = True
+    prune: bool = True
+    attachments: bool = False

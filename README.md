@@ -385,6 +385,15 @@ endpoints (POST/DELETE) unticked unless that is acceptable.
 The code lives in `app/bot/llm.py` (service), `app/bot/rcformat.py` (formatting) and
 `app/api/llm.py` (portal API).
 
+### Importing a folder (e.g. a Confluence space)
+
+Knowledge base → **Import a folder** takes a whole folder as a ZIP upload (up to 1 GB) or from
+`kb_import/` on the server (mounted read-only at `/app/kb_import`), as one *collection*. Markdown
+written by `confluence-markdown-exporter` is read as it is laid out: titles from the H1, links as
+their words, images, comments and the lock file skipped, attachments (optional) named after the
+links to them. Importing again under the same name syncs: unchanged files are skipped, changed
+ones replaced, removed ones removed. See DEPLOY.md §8.4. Code: `app/knowledge/folder.py`.
+
 ### Kept answers and caches
 
 Questions looked up in the knowledge base can be answered again without the model, in well

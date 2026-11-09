@@ -25,6 +25,7 @@ services:
       APP_CORS_ORIGINS: ${APP_CORS_ORIGINS:-http://localhost:8080}
       APP_SCRIPTS_DIR: /app/scripts
       APP_SKILLS_DIR: /app/skills
+      APP_KB_IMPORT_DIR: /app/kb_import
       APP_QDRANT_URL: ${APP_QDRANT_URL:-http://qdrant:6333}
     depends_on:
       - qdrant
@@ -35,6 +36,9 @@ services:
       - ./scripts:/app/scripts:ro
       # Skills: a folder each with a SKILL.md (see skills/_example). Read-only too.
       - ./skills:/app/skills:ro
+      # Folders to import into the knowledge base (e.g. a Confluence export),
+      # copied here and imported from the Knowledge base page.
+      - ./kb_import:/app/kb_import:ro
     # MCP servers running on the host are reached at http://host.docker.internal:<port>.
     extra_hosts:
       - "host.docker.internal:host-gateway"

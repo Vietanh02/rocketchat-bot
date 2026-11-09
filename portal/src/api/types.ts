@@ -681,3 +681,36 @@ export interface Skill {
 export interface SkillDetail extends Skill {
   text: string;
 }
+
+export interface ImportReport {
+  id: number;
+  collection: string;
+  origin: string;
+  status: "running" | "done" | "failed";
+  total: number;
+  done: number;
+  added: number;
+  updated: number;
+  unchanged: number;
+  removed: number;
+  duplicates: number;
+  skipped: number;
+  failures: { path: string; error: string }[];
+  error: string | null;
+  started_at: string;
+  ended_at: string | null;
+}
+
+export interface KbImports {
+  import_dir: string;
+  folders: { name: string; files: number }[];
+  collections: { name: string; documents: number; passages: number }[];
+  imports: ImportReport[];
+}
+
+export interface ImportOptions {
+  collection?: string;
+  model_index: boolean;
+  prune: boolean;
+  attachments: boolean;
+}

@@ -20,3 +20,7 @@ backend/rocketchat_bot.egg-info/
 
 # Release packages made by deploy/package.sh
 release/
+
+# Folders copied in to import into the knowledge base
+kb_import/*
+!kb_import/README.md

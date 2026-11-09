@@ -53,6 +53,9 @@ import type {
   Skill,
   SkillDetail,
   ToolPolicy,
+  ImportOptions,
+  ImportReport,
+  KbImports,
 } from "./types";
 
 const TOKEN_KEY = "rcbot.portal.token";
@@ -215,6 +218,20 @@ export const api = {
   deleteDocument: (id: number) => del(`/api/knowledge/documents/${id}`),
   reprocessDocument: (id: number) => post<KbDocument>(`/api/knowledge/documents/${id}/reprocess`),
   reindexKnowledge: () => post<KbStatus>("/api/knowledge/reindex"),
+  kbImports: () => get<KbImports>("/api/knowledge/imports"),
+  importZip: (file: File, options: ImportOptions) => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    if (options.collection) form.append("collection", options.collection);
+    form.append("model_index", String(options.model_index));
+    form.append("prune", String(options.prune));
+    form.append("attachments", String(options.attachments));
+    return request<ImportReport>("/api/knowledge/imports/zip", { method: "POST", body: form });
+  },
+  importServerFolder: (folder: string, options: ImportOptions) =>
+    post<ImportReport>("/api/knowledge/imports/folder", { folder, ...options }),
+  deleteCollection: (name: string) =>
+    request<{ removed: number }>(`/api/knowledge/collections/${encodeURIComponent(name)}`, { method: "DELETE" }),
   searchKnowledge: (q: string) =>
     get<KbSearchResult>(`/api/knowledge/search?q=${encodeURIComponent(q)}`),
 

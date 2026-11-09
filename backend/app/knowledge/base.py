@@ -123,6 +123,8 @@ class DocumentInfo:
     created_at: datetime | None
     stage: str = "queued"
     stage_error: str | None = None
+    collection: str | None = None
+    source_path: str | None = None
     sections: int = 0
     # Passages still without a vector of the current model (set by `documents`).
     pending: int = 0
@@ -145,6 +147,8 @@ class DocumentInfo:
             row.created_at,
             stage=source.stage if source is not None else "basic",
             stage_error=source.stage_error if source is not None else None,
+            collection=row.collection,
+            source_path=row.source_path,
         )
 
 
@@ -271,11 +275,17 @@ class KnowledgeBase:
         embedding: EmbeddingSettings,
         source: str = "portal",
         uploaded_by: str | None = None,
+        title: str | None = None,
+        collection: str | None = None,
+        source_path: str | None = None,
+        model_index: bool = True,
     ) -> tuple[DocumentInfo, bool]:
         """Read and store a document; (the document, False) if the scope already has it.
 
         The document is searchable by its words when this returns; the
-        model's indexing and the vectors follow in the background.
+        model's indexing (unless `model_index` is False) and the vectors
+        follow in the background. `title` replaces the one read from the
+        file; `collection` and `source_path` place an imported file.
         """
         digest = hashlib.sha256(data).hexdigest()
         async with self._session_factory() as db:
@@ -310,7 +320,7 @@ class KnowledgeBase:
         async with self._session_factory() as db:
             row = KbDocument(
                 scope=scope,
-                title=parsed.title[:300],
+                title=(title or parsed.title)[:300],
                 filename=filename[:300],
                 content_type=(content_type or "")[:128],
                 size_bytes=len(data),
@@ -322,6 +332,8 @@ class KnowledgeBase:
                 truncated=parsed.truncated,
                 source=source,
                 uploaded_by=uploaded_by,
+                collection=collection,
+                source_path=source_path,
             )
             db.add(row)
             await db.flush()
@@ -332,7 +344,7 @@ class KnowledgeBase:
                     text=body,
                     blocks_json=_blocks_to_json(blocks),
                     file_path=str(path),
-                    stage="queued",
+                    stage="queued" if model_index else "basic",
                 )
             )
             db.add_all(self._passage_rows(row.id, scope, body, sections, spans))
@@ -452,12 +464,15 @@ class KnowledgeBase:
         scope: str | None = None,
         source: str | None = None,
         embedding: EmbeddingSettings | None = None,
+        collection: str | None = None,
     ) -> list[DocumentInfo]:
         conditions = []
         if scope:
             conditions.append(KbDocument.scope == scope)
         if source:
             conditions.append(KbDocument.source == source)
+        if collection:
+            conditions.append(KbDocument.collection == collection)
         async with self._session_factory() as db:
             rows = (
                 await db.execute(
@@ -496,6 +511,35 @@ class KnowledgeBase:
             info.sections = sections.get(info.id, 0)
             info.pending = pending.get(info.id, 0)
         return infos
+
+    async def collection_files(self, collection: str) -> dict[str, tuple[int, str]]:
+        """The documents of an imported folder: {its path: (document id, content hash)}."""
+        async with self._session_factory() as db:
+            rows = await db.execute(
+                select(KbDocument.source_path, KbDocument.id, KbDocument.content_hash).where(
+                    KbDocument.scope == BASE_SCOPE, KbDocument.collection == collection
+                )
+            )
+            return {path: (doc_id, digest) for path, doc_id, digest in rows if path}
+
+    async def collections(self) -> list[tuple[str, int, int]]:
+        """Imported folders: (name, documents, passages)."""
+        async with self._session_factory() as db:
+            rows = await db.execute(
+                select(KbDocument.collection, func.count(KbDocument.id), func.sum(KbDocument.chunks))
+                .where(KbDocument.scope == BASE_SCOPE, KbDocument.collection.is_not(None))
+                .group_by(KbDocument.collection)
+                .order_by(KbDocument.collection)
+            )
+            return [(name, count, int(chunks or 0)) for name, count, chunks in rows]
+
+    async def forget_collection(self, collection: str) -> int:
+        """Remove every document of an imported folder; how many there were."""
+        removed = 0
+        for _, (document_id, _) in (await self.collection_files(collection)).items():
+            if await self.delete(document_id, [BASE_SCOPE]) is not None:
+                removed += 1
+        return removed
 
     async def scopes_with_documents(self, scopes: Sequence[str]) -> set[str]:
         async with self._session_factory() as db:

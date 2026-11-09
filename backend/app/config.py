@@ -73,6 +73,8 @@ class Settings(BaseSettings):
 
     # Uploaded knowledge base files are kept here, to be read again later.
     kb_files_dir: str = "./data/kb"
+    # Folders copied here (e.g. a Confluence export) can be imported from the portal.
+    kb_import_dir: str = str(Path(__file__).resolve().parents[2] / "kb_import")
 
     # Bot runtime
     bot_enabled: bool = True
