@@ -43,7 +43,10 @@ from app.agent.queue import MERGED, SessionQueue
 from app.agent.session import SessionState, SessionStore, session_key
 from app.agent.timing import TurnTimer
 from app.agent.tools import ToolProvider, ToolRegistry
+from app.agent.skills import SkillCatalog
 from app.agent.tools.knowledge import KnowledgeTools
+from app.agent.tools.mcp import McpTools
+from app.agent.tools.skills import SkillTools
 from app.agent.tools.memory import MemoryTools, ProfileTools
 from app.bot.llm import LLMError
 from app.cache.answers import AnswerCache, CachedAnswer
@@ -135,6 +138,7 @@ class AgentRunner:
         self.profiles = ProfileStore(session_factory)
         self.kb = KnowledgeBase(session_factory, self.knowledge)
         self.answers = AnswerCache(session_factory, self.knowledge, self.kb)
+        self.skills = SkillCatalog(session_factory)
         # Results of integrations whose answers may be reused (`cache_seconds`).
         self.tool_results: TTLCache = TTLCache(512, 60.0)
         self.queue = SessionQueue()
@@ -301,6 +305,11 @@ class AgentRunner:
                     min_score=snapshot.knowledge.min_score,
                 )
             )
+        if snapshot.mcp_tools:
+            providers.append(McpTools(snapshot.mcp_tools))
+        skills = await self._skills()
+        if skills:
+            providers.append(SkillTools(skills, turn.message.template_vars()))
         jobs_on = self.jobs is not None and settings.jobs_enabled
         job_tools = None
         if jobs_on:
@@ -314,7 +323,10 @@ class AgentRunner:
                 snapshot=snapshot,
             )
             providers.append(job_tools)
-        registry = ToolRegistry(providers)
+        # The tools this person may use (`app.agent.policy`).
+        registry = ToolRegistry(
+            providers, permit=snapshot.policy.for_user(turn.message.sender_username)
+        )
 
         so_far = ""
         status_line = ""
@@ -452,6 +464,13 @@ class AgentRunner:
             f"job #{job.id} in {len(plan.steps)} steps. Progress and the answer will appear here."
         )
         return AgentResult(text, "ok", None, session_id, chat.model, turns)
+
+    async def _skills(self) -> list:
+        try:
+            return await self.skills.available()
+        except Exception:  # noqa: BLE001 - answer without skills rather than not at all
+            log.warning("Could not read the skills folder", exc_info=True)
+            return []
 
     async def _kept_answer(
         self, wording: str, documents: str, snapshot: ConfigSnapshot, timer: TurnTimer

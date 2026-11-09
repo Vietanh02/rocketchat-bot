@@ -958,3 +958,83 @@ class AgentJobPhase(Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     job: Mapped[AgentJob] = relationship(back_populates="phases")
+
+
+class ToolPolicy(Base, TimestampMixin):
+    """Which tools the model may use for whom (single row).
+
+    Two profiles: "trusted" for the usernames listed here, "safe" for
+    everyone else. A tool is offered when its name matches one of the
+    profile's allow globs and none of its deny globs (one per line), e.g.
+    `mcp__*` for every MCP tool, `mcp__github__*` for one server's.
+    """
+
+    __tablename__ = "tool_policy"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    trusted_usernames: Mapped[str] = mapped_column(Text, default="")
+    safe_allow: Mapped[str] = mapped_column(Text, default="*")
+    safe_deny: Mapped[str] = mapped_column(Text, default="mcp__*\nskill_run")
+    trusted_allow: Mapped[str] = mapped_column(Text, default="*")
+    trusted_deny: Mapped[str] = mapped_column(Text, default="")
+
+
+class McpTransport(str, enum.Enum):
+    # Streamable HTTP: a URL, with headers (e.g. an Authorization token).
+    http = "http"
+    # A command started on this machine, spoken to over its stdin/stdout.
+    stdio = "stdio"
+
+
+class McpServer(Base, TimestampMixin):
+    """An MCP server whose tools the model may call (`app.integrations.mcp`)."""
+
+    __tablename__ = "mcp_server"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    transport: Mapped[str] = mapped_column(String(8), default=McpTransport.http.value)
+    url: Mapped[str] = mapped_column(String(512), default="")
+    # Fernet ciphertext of a JSON object; never returned by the API.
+    headers_enc: Mapped[str | None] = mapped_column(Text)
+    command: Mapped[str] = mapped_column(String(512), default="")
+    # JSON list of arguments.
+    args_json: Mapped[str] = mapped_column(Text, default="[]")
+    # Fernet ciphertext of a JSON object of environment variables.
+    env_enc: Mapped[str | None] = mapped_column(Text)
+    timeout_seconds: Mapped[float] = mapped_column(Float, default=30.0)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # What the last refresh of its tools found wrong, if anything.
+    last_error: Mapped[str | None] = mapped_column(Text)
+    tools_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    tools: Mapped[list[McpTool]] = relationship(
+        back_populates="server", cascade="all, delete-orphan", order_by="McpTool.name"
+    )
+
+
+class McpTool(Base):
+    """A tool an MCP server offers. Off until an admin turns it on: anyone who
+    can chat could get the model to call it with arguments of their choosing."""
+
+    __tablename__ = "mcp_tool"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    server_id: Mapped[int] = mapped_column(ForeignKey("mcp_server.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    description: Mapped[str] = mapped_column(Text, default="")
+    # JSON Schema of its arguments, as the server gave it.
+    input_schema_json: Mapped[str] = mapped_column(Text, default="{}")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    server: Mapped[McpServer] = relationship(back_populates="tools")
+
+
+class SkillState(Base, TimestampMixin):
+    """Whether a skill found in the skills folder is offered (by its folder name)."""
+
+    __tablename__ = "skill_state"
+
+    name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)

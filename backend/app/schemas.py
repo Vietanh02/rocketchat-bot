@@ -977,3 +977,139 @@ class JobOut(BaseModel):
     started_at: datetime | None = None
     ended_at: datetime | None = None
     phases: list[JobPhaseOut]
+
+
+# --------------------------------------------------------------------------- #
+# Tool policy, MCP servers, skills
+# --------------------------------------------------------------------------- #
+
+
+class ToolPolicyOut(BaseModel):
+    # One per line.
+    trusted_usernames: str
+    safe_allow: str
+    safe_deny: str
+    trusted_allow: str
+    trusted_deny: str
+
+
+class ToolPolicyUpdate(BaseModel):
+    trusted_usernames: str | None = Field(default=None, max_length=20000)
+    safe_allow: str | None = Field(default=None, max_length=4000)
+    safe_deny: str | None = Field(default=None, max_length=4000)
+    trusted_allow: str | None = Field(default=None, max_length=4000)
+    trusted_deny: str | None = Field(default=None, max_length=4000)
+
+
+class PolicyToolOut(BaseModel):
+    name: str
+    kind: str
+    safe: bool
+    trusted: bool
+
+
+class McpToolOut(BaseModel):
+    id: int
+    name: str
+    # As offered to the model.
+    tool_name: str
+    description: str
+    input_schema: dict[str, Any]
+    enabled: bool
+
+
+class McpServerOut(BaseModel):
+    id: int
+    name: str
+    description: str
+    transport: Literal["http", "stdio"]
+    url: str
+    command: str
+    args: list[str]
+    timeout_seconds: float
+    enabled: bool
+    # Header and environment names only; their values never leave the server.
+    header_names: list[str]
+    env_names: list[str]
+    last_error: str | None = None
+    tools_refreshed_at: datetime | None = None
+    tools: list[McpToolOut]
+
+
+class McpServerIn(BaseModel):
+    name: str = Field(min_length=1, max_length=40, pattern=r"^[A-Za-z0-9_-]+$")
+    description: str = Field(default="", max_length=2000)
+    transport: Literal["http", "stdio"] = "http"
+    url: str = Field(default="", max_length=512)
+    command: str = Field(default="", max_length=512)
+    args: list[str] = Field(default_factory=list, max_length=50)
+    timeout_seconds: float = Field(default=30.0, ge=1, le=300)
+    enabled: bool = True
+    # Write-only. JSON objects; omit to keep, {} to clear.
+    headers: dict[str, str] | None = None
+    env: dict[str, str] | None = None
+
+    @field_validator("url")
+    @classmethod
+    def _url(cls, value: str) -> str:
+        value = value.strip()
+        if value and not re.match(r"^https?://[^\s/]+", value):
+            raise ValueError("must be an http:// or https:// URL")
+        return value
+
+
+class McpServerUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=40, pattern=r"^[A-Za-z0-9_-]+$")
+    description: str | None = Field(default=None, max_length=2000)
+    transport: Literal["http", "stdio"] | None = None
+    url: str | None = Field(default=None, max_length=512)
+    command: str | None = Field(default=None, max_length=512)
+    args: list[str] | None = Field(default=None, max_length=50)
+    timeout_seconds: float | None = Field(default=None, ge=1, le=300)
+    enabled: bool | None = None
+    headers: dict[str, str] | None = None
+    env: dict[str, str] | None = None
+
+    @field_validator("url")
+    @classmethod
+    def _url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if value and not re.match(r"^https?://[^\s/]+", value):
+            raise ValueError("must be an http:// or https:// URL")
+        return value
+
+
+class McpToolUpdate(BaseModel):
+    enabled: bool
+
+
+class McpCallIn(BaseModel):
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class McpCallOut(BaseModel):
+    ok: bool
+    text: str
+    duration_ms: int
+
+
+class SkillOut(BaseModel):
+    name: str
+    title: str
+    description: str
+    enabled: bool
+    available: bool
+    missing: list[str]
+    error: str | None = None
+    scripts: list[str]
+    files: list[str]
+
+
+class SkillDetailOut(SkillOut):
+    text: str
+
+
+class SkillUpdate(BaseModel):
+    enabled: bool

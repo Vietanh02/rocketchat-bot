@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import type { AccessCheckResult, AccessEntry, AccessMode } from "../api/types";
 import { useAuth } from "../auth";
+import ToolPolicyCard from "../components/ToolPolicyCard";
 import { Banner, Card, Empty, Field, Loading, Pill } from "../components/ui";
 import { formatDateTime } from "../format";
 import { errorMessage, useResource } from "../hooks";
@@ -241,6 +242,8 @@ export default function AccessPage() {
           )}
         </form>
       </Card>
+
+      <ToolPolicyCard isAdmin={isAdmin} />
     </div>
   );
 }

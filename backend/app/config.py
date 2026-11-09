@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     # portal. The portal can only pick from it, never write to it.
     scripts_dir: str = str(Path(__file__).resolve().parents[2] / "scripts")
     script_max_timeout_seconds: float = 300.0
+    # Skills: one folder each, with a SKILL.md and optional scripts/.
+    skills_dir: str = str(Path(__file__).resolve().parents[2] / "skills")
     # Scripts running at once, across chat and the portal's tester.
     script_max_concurrency: int = Field(default=20, ge=1, le=200)
     # Comma-separated names of environment variables scripts may see (API keys,

@@ -18,3 +18,5 @@ python-multipart>=0.0.12
 pypdf>=5.1
 python-docx>=1.1
 openai>=1.50
+# The bot as an MCP client (app/integrations/mcp.py).
+mcp>=2.3,<3

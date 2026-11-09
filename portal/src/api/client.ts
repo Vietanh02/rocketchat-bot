@@ -46,6 +46,13 @@ import type {
   CacheStats,
   CacheTestResult,
   Job,
+  McpCallResult,
+  McpServer,
+  McpServerDraft,
+  PolicyTool,
+  Skill,
+  SkillDetail,
+  ToolPolicy,
 } from "./types";
 
 const TOKEN_KEY = "rcbot.portal.token";
@@ -225,6 +232,25 @@ export const api = {
 
   listJobs: () => get<Job[]>("/api/jobs"),
   cancelJob: (id: number) => post<Job>(`/api/jobs/${id}/cancel`),
+
+  getPolicy: () => get<ToolPolicy>("/api/policy"),
+  updatePolicy: (changes: Partial<ToolPolicy>) => put<ToolPolicy>("/api/policy", changes),
+  policyTools: () => get<PolicyTool[]>("/api/policy/tools"),
+
+  listMcpServers: () => get<McpServer[]>("/api/mcp"),
+  createMcpServer: (draft: McpServerDraft) => post<McpServer>("/api/mcp", draft),
+  updateMcpServer: (id: number, changes: Partial<McpServerDraft>) => put<McpServer>(`/api/mcp/${id}`, changes),
+  deleteMcpServer: (id: number) => del(`/api/mcp/${id}`),
+  refreshMcpServer: (id: number) => post<McpServer>(`/api/mcp/${id}/refresh`),
+  setMcpTool: (serverId: number, toolId: number, enabled: boolean) =>
+    put<McpServer>(`/api/mcp/${serverId}/tools/${toolId}`, { enabled }),
+  callMcpTool: (serverId: number, toolId: number, args: Record<string, unknown>) =>
+    post<McpCallResult>(`/api/mcp/${serverId}/tools/${toolId}/call`, { arguments: args }),
+
+  listSkills: () => get<Skill[]>("/api/skills"),
+  skillsFolder: () => get<{ path: string; exists: boolean }>("/api/skills/folder"),
+  getSkill: (name: string) => get<SkillDetail>(`/api/skills/${encodeURIComponent(name)}`),
+  setSkill: (name: string, enabled: boolean) => put<Skill>(`/api/skills/${encodeURIComponent(name)}`, { enabled }),
 
   listAccess: () => get<AccessEntry[]>("/api/access"),
   addAccess: (usernames: string, note = "") =>

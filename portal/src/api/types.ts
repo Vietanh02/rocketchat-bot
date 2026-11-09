@@ -602,3 +602,82 @@ export interface Job {
   ended_at: string | null;
   phases: JobPhase[];
 }
+
+export interface ToolPolicy {
+  trusted_usernames: string;
+  safe_allow: string;
+  safe_deny: string;
+  trusted_allow: string;
+  trusted_deny: string;
+}
+
+export interface PolicyTool {
+  name: string;
+  kind: string;
+  safe: boolean;
+  trusted: boolean;
+}
+
+export type McpTransport = "http" | "stdio";
+
+export interface McpTool {
+  id: number;
+  name: string;
+  tool_name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+  enabled: boolean;
+}
+
+export interface McpServer {
+  id: number;
+  name: string;
+  description: string;
+  transport: McpTransport;
+  url: string;
+  command: string;
+  args: string[];
+  timeout_seconds: number;
+  enabled: boolean;
+  header_names: string[];
+  env_names: string[];
+  last_error: string | null;
+  tools_refreshed_at: string | null;
+  tools: McpTool[];
+}
+
+export interface McpServerDraft {
+  name: string;
+  description: string;
+  transport: McpTransport;
+  url: string;
+  command: string;
+  args: string[];
+  timeout_seconds: number;
+  enabled: boolean;
+  /** Write-only; omit to keep the stored ones, {} to clear them. */
+  headers?: Record<string, string>;
+  env?: Record<string, string>;
+}
+
+export interface McpCallResult {
+  ok: boolean;
+  text: string;
+  duration_ms: number;
+}
+
+export interface Skill {
+  name: string;
+  title: string;
+  description: string;
+  enabled: boolean;
+  available: boolean;
+  missing: string[];
+  error: string | null;
+  scripts: string[];
+  files: string[];
+}
+
+export interface SkillDetail extends Skill {
+  text: string;
+}

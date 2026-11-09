@@ -440,3 +440,28 @@ Admins see every job, with each step's output, on the **Jobs** page. Two jobs ru
 person may have two under way (configurable), with up to six steps each.
 
 The code lives in `app/agent/jobs.py` and `app/api/jobs.py`.
+
+### Tools by profile, MCP servers, skills
+
+**Who gets which tool** (Access → *Tools by profile*): people listed as trusted get the
+*trusted* profile, everyone else *safe*. A tool is offered when its name matches an allow glob
+and no deny glob. By default safe people get every tool except MCP tools (`mcp__*`) and
+running skill scripts (`skill_run`); trusted people get them all. In a channel the profile is the
+sender's; a job uses the profile of the person who started it.
+
+**MCP servers** (MCP servers page): the bot is an MCP client (`mcp` SDK). A server is either a
+Streamable HTTP URL with headers (stored encrypted; the private-network guard applies, and a
+server on the host is `http://host.docker.internal:<port>/mcp`) or a command run in the backend
+container over stdio (the image has Python only; a Node server needs `node`/`npx` added). *Refresh
+tools* lists its tools, which start **off**; turn on the ones the model may call. They are offered
+as `mcp__<server>__<tool>`. Each call opens a new session and is bounded by the server's timeout.
+
+**Skills** (Skills page): folders in `skills/` (mounted read-only at `/app/skills`), each with a
+`SKILL.md` whose front matter gives `name`, `description` and optional `requires.bins` /
+`requires.env`. The model sees the list in its `skill_read` tool, reads a skill before following
+it, and runs the skill's `scripts/` with `skill_run` (45 s at most, like script commands). A skill
+whose requirements are missing, or that an admin turned off, is not offered. See
+`skills/_example`.
+
+The code lives in `app/agent/policy.py`, `app/integrations/mcp.py`, `app/agent/tools/mcp.py`,
+`app/agent/skills.py` and `app/agent/tools/skills.py`.

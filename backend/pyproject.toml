@@ -26,6 +26,7 @@ dependencies = [
     "pypdf>=5.1",
     "python-docx>=1.1",
     "openai>=1.50",
+    "mcp>=2.3,<3",
 ]
 
 [project.optional-dependencies]

@@ -16,6 +16,8 @@ import LogsPage from "./pages/Logs";
 import KnowledgePage from "./pages/Knowledge";
 import CachePage from "./pages/Cache";
 import JobsPage from "./pages/Jobs";
+import McpPage from "./pages/Mcp";
+import SkillsPage from "./pages/Skills";
 import MemoryPage from "./pages/Memory";
 import SettingsPage from "./pages/Settings";
 import TasksPage from "./pages/Tasks";
@@ -38,6 +40,8 @@ function App() {
         <Route path="/knowledge" element={<KnowledgePage />} />
         <Route path="/cache" element={<CachePage />} />
         <Route path="/jobs" element={<JobsPage />} />
+        <Route path="/mcp" element={<McpPage />} />
+        <Route path="/skills" element={<SkillsPage />} />
         <Route path="/tasks" element={<TasksPage />} />
         <Route path="/access" element={<AccessPage />} />
         <Route path="/logs" element={<LogsPage />} />

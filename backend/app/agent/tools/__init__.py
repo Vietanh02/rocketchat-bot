@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -38,12 +38,20 @@ class ToolProvider(Protocol):
 class ToolRegistry:
     """Every tool offered to the model in one turn."""
 
-    def __init__(self, providers: Iterable[ToolProvider] = ()) -> None:
+    def __init__(
+        self,
+        providers: Iterable[ToolProvider] = (),
+        *,
+        permit: Callable[[str], bool] | None = None,
+    ) -> None:
+        """`permit` says which tool names the person asking may use (`app.agent.policy`)."""
         self._routes: dict[str, tuple[ToolProvider, str]] = {}
         self.schemas: list[dict[str, Any]] = []
         for provider in providers:
             for own_name, function in provider.tools().items():
                 name = tool_name(own_name, self._routes)
+                if permit is not None and not permit(name):
+                    continue
                 self._routes[name] = (provider, own_name)
                 self.schemas.append({"type": "function", "function": {**function, "name": name}})
 

@@ -14,6 +14,8 @@ const NAV = [
   { to: "/knowledge", label: "Knowledge base" },
   { to: "/cache", label: "Cache" },
   { to: "/jobs", label: "Jobs" },
+  { to: "/mcp", label: "MCP servers" },
+  { to: "/skills", label: "Skills" },
   { to: "/tasks", label: "Reminders" },
   { to: "/access", label: "Access" },
   { to: "/logs", label: "Logs" },

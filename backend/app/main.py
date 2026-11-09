@@ -20,7 +20,10 @@ from app.api import (
     knowledge,
     llm,
     logs,
+    mcp as mcp_api,
     memory,
+    policy as policy_api,
+    skills as skills_api,
     tasks,
 )
 from app.bootstrap import run_bootstrap
@@ -83,6 +86,9 @@ def create_app() -> FastAPI:
     app.include_router(knowledge.router)
     app.include_router(cache_api.router)
     app.include_router(jobs_api.router)
+    app.include_router(policy_api.router)
+    app.include_router(mcp_api.router)
+    app.include_router(skills_api.router)
     app.include_router(tasks.router)
     app.include_router(logs.router)
     app.include_router(access.router)

@@ -41,6 +41,8 @@ from app.agent.prompt import system_text
 from app.agent.tools import ToolRegistry, tool_result
 from app.agent.tools.integrations import IntegrationTools
 from app.agent.tools.knowledge import KnowledgeTools
+from app.agent.tools.mcp import McpTools
+from app.agent.tools.skills import SkillTools
 from app.bot.llm import LLMError
 from app.bot.rcformat import strip_thinking, to_rocketchat
 from app.bot.streaming import deliver
@@ -551,7 +553,13 @@ class JobService:
                         min_score=snapshot.knowledge.min_score,
                     )
                 )
-        return ToolRegistry(providers)
+        if snapshot.mcp_tools:
+            providers.append(McpTools(snapshot.mcp_tools))
+        skills = await self.agent._skills()
+        if skills:
+            providers.append(SkillTools(skills, message.template_vars()))
+        # The tools of the person who started the job.
+        return ToolRegistry(providers, permit=snapshot.policy.for_user(job.owner_username))
 
     async def _finish(self, job: AgentJob) -> None:
         snapshot, _ = await self._model_access()

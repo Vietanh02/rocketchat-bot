@@ -21,6 +21,7 @@ services:
       APP_RC_WS_URL: ${APP_RC_WS_URL:-ws://rocketchat:3000/websocket}
       APP_CORS_ORIGINS: ${APP_CORS_ORIGINS:-http://localhost:8080}
       APP_SCRIPTS_DIR: /app/scripts
+      APP_SKILLS_DIR: /app/skills
       APP_QDRANT_URL: ${APP_QDRANT_URL:-http://qdrant:6333}
     depends_on:
       - qdrant
@@ -29,6 +30,11 @@ services:
       # Script commands. Read-only: the bot runs these files, never writes them.
       # Edits on the host apply on the next run, with no rebuild.
       - ./scripts:/app/scripts:ro
+      # Skills: a folder each with a SKILL.md (see skills/_example). Read-only too.
+      - ./skills:/app/skills:ro
+    # MCP servers running on the host are reached at http://host.docker.internal:<port>.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - botnet
       - rocketchat

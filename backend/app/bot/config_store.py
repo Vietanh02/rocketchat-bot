@@ -21,9 +21,14 @@ from app.bot.access import AccessPolicy
 from app.bot.router import Router
 from app.config import Settings, get_settings
 from app.integrations.executor import IntegrationSpec
+from app.agent.policy import ToolPolicySettings
+from app.integrations.mcp import McpServerSpec, McpToolSpec
 from app.models import (
     AgentConfig,
     BotAccessEntry,
+    McpServer,
+    McpTool,
+    ToolPolicy,
     EmbeddingConfig,
     KnowledgeConfig,
     MemoryConfig,
@@ -292,6 +297,10 @@ class ConfigSnapshot:
     embedding: EmbeddingSettings = EmbeddingSettings()
     memory: MemorySettings = MemorySettings()
     knowledge: KnowledgeSettings = KnowledgeSettings()
+    # Who may use which tools.
+    policy: ToolPolicySettings = ToolPolicySettings()
+    # Enabled tools of enabled MCP servers.
+    mcp_tools: tuple[McpToolSpec, ...] = ()
 
     def integration_by_name(self, name: str) -> IntegrationSpec | None:
         folded = name.casefold()
@@ -396,6 +405,16 @@ async def ensure_knowledge_config(session: AsyncSession) -> KnowledgeConfig:
     return config
 
 
+async def ensure_tool_policy(session: AsyncSession) -> ToolPolicy:
+    """Fetch the singleton tool policy row, creating it with the defaults once."""
+    config = await session.get(ToolPolicy, 1)
+    if config is None:
+        config = ToolPolicy(id=1)
+        session.add(config)
+        await session.flush()
+    return config
+
+
 async def bump_config_version(session: AsyncSession) -> int:
     """Signal every cache that configuration changed."""
     config = await ensure_bot_config(session)
@@ -443,6 +462,7 @@ class ConfigStore:
                 embedding_config = await ensure_embedding_config(session)
                 memory_config = await ensure_memory_config(session)
                 knowledge_config = await ensure_knowledge_config(session)
+                policy_config = await ensure_tool_policy(session)
                 await session.commit()
                 await session.refresh(config)
                 await session.refresh(llm_config)
@@ -450,6 +470,20 @@ class ConfigStore:
                 await session.refresh(embedding_config)
                 await session.refresh(memory_config)
                 await session.refresh(knowledge_config)
+                await session.refresh(policy_config)
+                mcp_rows = (
+                    await session.execute(
+                        select(McpTool, McpServer)
+                        .join(McpServer, McpServer.id == McpTool.server_id)
+                        .where(McpTool.enabled.is_(True), McpServer.enabled.is_(True))
+                        .order_by(McpServer.name, McpTool.name)
+                    )
+                ).all()
+                servers = {server.id: McpServerSpec.from_model(server) for _, server in mcp_rows}
+                mcp_tools = tuple(
+                    McpToolSpec(servers[server.id], tool.name, tool.description, tool.input_schema_json)
+                    for tool, server in mcp_rows
+                )
 
                 commands = list(
                     (await session.scalars(select(Command).order_by(Command.priority, Command.id))).all()
@@ -482,6 +516,8 @@ class ConfigStore:
                 embedding=EmbeddingSettings.from_model(embedding_config),
                 memory=MemorySettings.from_model(memory_config),
                 knowledge=KnowledgeSettings.from_model(knowledge_config),
+                policy=ToolPolicySettings.from_model(policy_config),
+                mcp_tools=mcp_tools,
             )
             self._snapshot = snapshot
             log.debug(
