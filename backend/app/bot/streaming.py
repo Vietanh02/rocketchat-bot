@@ -196,14 +196,24 @@ async def _finish(
     text: str,
     thread_id: str | None,
 ) -> SentMessage:
-    """After a failed edit: one more try at the full text, else a new message."""
+    """After a failed edit: one more try at the full text, else a new message.
+
+    Editing fails when it is disabled for the bot, or when Rocket.Chat's rate
+    limit (10 edits a minute unless the account may bypass it) is reached.
+    The full reply then goes in a new message and the partial one is
+    removed, so the answer is not shown twice.
+    """
     try:
         await gateway.update_message(room_id, message_id, text)
         return SentMessage(room_id, text, thread_id, message_id)
-    except RocketChatError:
-        # Editing is probably disabled for the bot. The partial message stays,
-        # but the full reply follows it.
-        return await gateway.send_message(room_id, text, thread_id=thread_id)
+    except RocketChatError as exc:
+        log.info("Could not finish the live message (%s); posting the reply anew", exc)
+    sent = await gateway.send_message(room_id, text, thread_id=thread_id)
+    try:
+        await gateway.delete_message(room_id, message_id)
+    except RocketChatError as exc:
+        log.warning("Could not remove the partial message %s: %s", message_id, exc)
+    return sent
 
 
 class LiveReply:

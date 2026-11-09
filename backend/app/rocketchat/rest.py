@@ -115,6 +115,12 @@ class RocketChatRest:
             json={"roomId": room_id, "msgId": message_id, "text": text},
         )
 
+    async def delete_message(self, room_id: str, message_id: str) -> None:
+        """Remove a message the bot posted."""
+        await self._request(
+            "POST", "/chat.delete", json={"roomId": room_id, "msgId": message_id}
+        )
+
     async def download(self, path: str, *, max_bytes: int) -> bytes:
         """A file uploaded to Rocket.Chat, by its path (as in a message's attachment)."""
         if not path.startswith(("/file-upload/", "/ufs/")):

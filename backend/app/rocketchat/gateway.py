@@ -34,6 +34,8 @@ class Gateway(Protocol):
 
     async def update_message(self, room_id: str, message_id: str, text: str) -> None: ...
 
+    async def delete_message(self, room_id: str, message_id: str) -> None: ...
+
     async def react(self, message_id: str, emoji: str, *, on: bool = True) -> None: ...
 
     async def download_file(self, path: str, *, max_bytes: int) -> bytes: ...
@@ -61,6 +63,9 @@ class LiveGateway:
 
     async def update_message(self, room_id: str, message_id: str, text: str) -> None:
         await self.rest.update_message(room_id, message_id, text)
+
+    async def delete_message(self, room_id: str, message_id: str) -> None:
+        await self.rest.delete_message(room_id, message_id)
 
     async def react(self, message_id: str, emoji: str, *, on: bool = True) -> None:
         await self.rest.react(message_id, emoji, should_react=on)
@@ -94,6 +99,9 @@ class FakeGateway:
         # Every edit, in order, as (message_id, text).
         self.updates: list[tuple[str, str]] = []
         self.fail_updates: Exception | None = None
+        # Ids of messages deleted, in order.
+        self.deleted: list[str] = []
+        self.fail_deletes: Exception | None = None
         # Reactions currently on, as (message_id, emoji).
         self.reactions: list[tuple[str, str]] = []
         # Files that can be downloaded, by path.
@@ -120,6 +128,15 @@ class FakeGateway:
                 self.updates.append((message_id, text))
                 return
         raise RocketChatError(f"no message {message_id!r}")
+
+    async def delete_message(self, room_id: str, message_id: str) -> None:
+        if self.fail_deletes is not None:
+            raise self.fail_deletes
+        before = len(self.sent)
+        self.sent = [m for m in self.sent if m.message_id != message_id]
+        if len(self.sent) == before:
+            raise RocketChatError(f"no message {message_id!r}")
+        self.deleted.append(message_id)
 
     async def react(self, message_id: str, emoji: str, *, on: bool = True) -> None:
         if on:

@@ -142,14 +142,22 @@ async def test_a_short_reply_is_not_streamed():
     assert [m.text for m in gateway.sent] == ["ok"] and gateway.updates == []
 
 
-async def test_if_editing_is_refused_the_full_reply_is_still_sent():
+async def test_if_editing_is_refused_the_full_reply_replaces_the_partial_one():
     gateway = FakeGateway()
     gateway.fail_updates = RocketChatError("editing is not allowed")
     sent = await deliver(gateway, "R1", LONG, options=STREAM, sleep=no_sleep)
 
-    assert len(gateway.sent) == 2
-    assert gateway.sent[0].text.endswith(STREAM_CURSOR)
-    assert gateway.sent[1].text == LONG == sent.text
+    # The partial message is removed: the answer is shown once.
+    assert [m.text for m in gateway.sent] == [LONG] and sent.text == LONG
+    assert gateway.deleted == ["fake-1"]
+
+
+async def test_a_partial_message_that_cannot_be_removed_stays_above_the_reply():
+    gateway = FakeGateway()
+    gateway.fail_updates = RocketChatError("HTTP 429: too many requests")
+    gateway.fail_deletes = RocketChatError("deleting is not allowed")
+    await deliver(gateway, "R1", LONG, options=STREAM, sleep=no_sleep)
+    assert len(gateway.sent) == 2 and gateway.sent[1].text == LONG
 
 
 # --------------------------------------------------------------------------- #
@@ -292,7 +300,8 @@ async def test_if_live_edits_are_refused_the_full_reply_follows(fast_live):
     live.push("step 1 step 2")
     await asyncio.sleep(0.1)
     await live.finish("step 1 step 2")
-    assert [m.text for m in gateway.sent] == ["step 1" + STREAM_CURSOR, "step 1 step 2"]
+    assert [m.text for m in gateway.sent] == ["step 1 step 2"]
+    assert len(gateway.deleted) == 1
 
 
 # --------------------------------------------------------------------------- #
