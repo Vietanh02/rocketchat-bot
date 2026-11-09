@@ -187,6 +187,10 @@ class LLMConfig(Base, TimestampMixin):
     history_messages: Mapped[int] = mapped_column(Integer, default=10)
     # Rewrite the model's Markdown into what Rocket.Chat renders.
     format_for_rocketchat: Mapped[bool] = mapped_column(Boolean, default=True)
+    # A JSON object added to the requests of quick side jobs (sorting a
+    # message, picking passages, indexing, summaries), e.g. to turn a
+    # reasoning model's thinking off: {"chat_template_kwargs": {"enable_thinking": false}}.
+    quick_extra_body: Mapped[str] = mapped_column(Text, default="")
 
 
 class BotAccessEntry(Base, TimestampMixin):

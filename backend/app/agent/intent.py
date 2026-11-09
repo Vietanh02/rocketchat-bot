@@ -164,6 +164,7 @@ async def detect(
                     ],
                     model=fast_model or None,
                     max_tokens=5,
+                    quick=True,
                 )
         except asyncio.CancelledError:
             raise

@@ -59,6 +59,7 @@ export default function LLMPage() {
       ...values(),
       enabled: form!.enabled,
       history_messages: form!.history_messages,
+      quick_extra_body: form!.quick_extra_body,
     };
     // The key is only sent when typed, so an untouched field never clears it.
     if (apiKey) changes.api_key = apiKey;
@@ -290,6 +291,29 @@ export default function LLMPage() {
             Streaming follows <Link to="/settings">Bot settings → Reply style</Link>: the answer is typed
             out as the model writes it.
           </p>
+
+          <Field
+            label="Extra request fields for quick jobs"
+            hint={
+              <>
+                A JSON object added to the small side requests: sorting a message, picking passages,
+                indexing documents, summaries. Use it to turn a reasoning model's thinking off, which
+                makes them several times faster. vLLM / SGLang:{" "}
+                <code>{'{"chat_template_kwargs": {"enable_thinking": false, "thinking": false}}'}</code>;
+                DeepSeek API: <code>{'{"thinking": {"type": "disabled"}}'}</code>; OpenAI:{" "}
+                <code>{'{"reasoning_effort": "low"}'}</code>. Empty: none. Answers in chat are sent
+                without them.
+              </>
+            }
+          >
+            <textarea
+              rows={2}
+              placeholder='{"chat_template_kwargs": {"enable_thinking": false}}'
+              value={form.quick_extra_body}
+              disabled={!isAdmin}
+              onChange={(event) => set("quick_extra_body", event.target.value)}
+            />
+          </Field>
         </div>
       </Card>
 

@@ -107,6 +107,8 @@ class LLMSettings:
     temperature: float | None = None
     history_messages: int = 10
     format_for_rocketchat: bool = True
+    # JSON text; see `app.models.LLMConfig.quick_extra_body`.
+    quick_extra_body: str = ""
 
     @property
     def configured(self) -> bool:
@@ -124,6 +126,7 @@ class LLMSettings:
             temperature=model.temperature,
             history_messages=model.history_messages,
             format_for_rocketchat=model.format_for_rocketchat,
+            quick_extra_body=(model.quick_extra_body or "").strip(),
         )
 
 

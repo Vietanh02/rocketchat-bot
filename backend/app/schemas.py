@@ -153,6 +153,8 @@ class LLMConfigOut(BaseModel):
     temperature: float | None = None
     history_messages: int
     format_for_rocketchat: bool
+    # JSON object sent with quick side jobs; "" for none.
+    quick_extra_body: str = ""
     has_api_key: bool
     # Gateway, key and model are all set.
     configured: bool
@@ -173,8 +175,19 @@ class LLMConfigUpdate(BaseModel):
     temperature: float | None = Field(default=None, ge=0, le=2)
     history_messages: int | None = Field(default=None, ge=0, le=100)
     format_for_rocketchat: bool | None = None
+    quick_extra_body: str | None = Field(default=None, max_length=4000)
 
     _base_url = field_validator("base_url")(classmethod(lambda cls, v: _gateway_url(v)))
+
+    @field_validator("quick_extra_body")
+    @classmethod
+    def _extra_body(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        from app.bot.llm import parse_extra_body
+
+        parse_extra_body(value)
+        return value.strip()
 
     @field_validator("model")
     @classmethod

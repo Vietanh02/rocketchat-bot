@@ -26,7 +26,7 @@ from app.models import BotConfig, KbDocument, KbPassage, KbSource
 from app.rocketchat.ddp import RcFile, parse_files, parse_message
 from app.bot.types import MessageContext
 from tests.test_agent import model, settle  # noqa: F401
-from tests.test_llm import FakeModel, fake_transport, set_config, tool_use
+from tests.test_llm import FakeModel, fake_transport, set_config, set_llm, tool_use
 from tests.test_memory import FakeEmbeddings, set_embedding
 from tests.test_responder import context, incoming
 
@@ -666,6 +666,31 @@ async def test_a_model_that_cannot_index_leaves_the_heading_cut(app_env, gateway
     assert document.stage == "failed" and "no usable sections" in document.stage_error
     found = await kb_of(app_env).search("làm thêm ngày lễ", [BASE_SCOPE], embedding=NO_VECTORS)
     assert found and found[0].document_id == info.id
+
+
+async def test_an_index_cut_off_by_the_token_limit_keeps_its_whole_sections(app_env, gateway, model):
+    whole = sections_answer({})
+    # Cut inside the second section, as a model stopped by max_tokens would be.
+    model.on_index = lambda body: whole[: whole.index('"title": "Làm thêm giờ"') + 10]
+    await add_base(app_env, "so-tay.md", HANDBOOK)
+    await wait_for_pipeline(app_env)
+    async with app_env.session_factory() as db:
+        passages = (await db.scalars(select(KbPassage).order_by(KbPassage.ord))).all()
+    # The first section is the model's; the blocks after it go by their headings.
+    assert passages[0].section == "Giờ làm việc" and "office hours" in passages[0].keywords
+    assert passages[-1].section == "Làm thêm giờ" and passages[-1].keywords == ""
+    [document] = await kb_of(app_env).documents()
+    assert document.stage == "indexed"
+
+
+async def test_indexing_streams_and_sends_the_quick_job_fields(app_env, gateway, model):
+    await set_llm(app_env, quick_extra_body='{"chat_template_kwargs": {"enable_thinking": false}}')
+    model.on_index = sections_answer
+    await add_base(app_env, "so-tay.md", HANDBOOK)
+    await wait_for_pipeline(app_env)
+    [request] = model.side_requests
+    assert request["stream"] is True
+    assert request["chat_template_kwargs"] == {"enable_thinking": False}
 
 
 async def test_indexing_can_be_turned_off(app_env, gateway, model):

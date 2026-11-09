@@ -409,6 +409,7 @@ class AgentRunner:
                 ],
                 model=snapshot.agent.fast_model or None,
                 max_tokens=EXTRACT_MAX_TOKENS,
+                quick=True,
             )
             for note in parse_notes(strip_thinking(raw))[:EXTRACT_MAX_NOTES]:
                 try:
@@ -465,6 +466,7 @@ class AgentRunner:
                 ],
                 model=fast_model or None,
                 max_tokens=SUMMARY_MAX_TOKENS,
+                quick=True,
             )
             summary = strip_thinking(summary).strip()
             if summary:

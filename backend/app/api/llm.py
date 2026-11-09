@@ -33,6 +33,7 @@ PLAIN_FIELDS = (
     "timeout_seconds",
     "history_messages",
     "format_for_rocketchat",
+    "quick_extra_body",
 )
 # Null is meaningful for these: it leaves the choice to the gateway.
 NULLABLE_FIELDS = ("max_tokens", "temperature")
@@ -50,6 +51,7 @@ def _to_out(config: LLMConfig, bot: BotConfig) -> LLMConfigOut:
         temperature=config.temperature,
         history_messages=config.history_messages,
         format_for_rocketchat=config.format_for_rocketchat,
+        quick_extra_body=config.quick_extra_body or "",
         has_api_key=bool(config.api_key_enc),
         configured=settings.configured,
         default_system_prompt=(

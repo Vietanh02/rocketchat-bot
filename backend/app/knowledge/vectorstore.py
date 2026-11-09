@@ -14,6 +14,7 @@ only, so vectors of an old model are ignored while they are being redone.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from collections.abc import Sequence
@@ -114,6 +115,9 @@ class QdrantStore:
         self._timeout = timeout
         # Collections known to exist, with their vector size.
         self._known: dict[str, int] = {}
+        # One check-and-create per collection at a time: two indexing runs
+        # starting together would otherwise both try to create it.
+        self._creating: dict[str, asyncio.Lock] = {}
         self.breaker = Breaker("Qdrant")
 
     def _name(self, name: str) -> str:
@@ -178,6 +182,12 @@ class QdrantStore:
         return vectors.get("size") if isinstance(vectors, dict) else None
 
     async def ensure_collection(self, name: str, dimensions: int) -> bool:
+        if self._known.get(name) == dimensions:
+            return False
+        async with self._creating.setdefault(name, asyncio.Lock()):
+            return await self._ensure_collection(name, dimensions)
+
+    async def _ensure_collection(self, name: str, dimensions: int) -> bool:
         if self._known.get(name) == dimensions:
             return False
         size = await self._size(name)

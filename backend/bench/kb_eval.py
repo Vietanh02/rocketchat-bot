@@ -160,8 +160,17 @@ TOP_K = 3
 
 def live_settings() -> tuple[LLMSettings, EmbeddingSettings]:
     db = sqlite3.connect(LIVE_DB)
-    base_url, key, model = db.execute("select base_url, api_key_enc, model from llm_config").fetchone()
-    llm = LLMSettings(base_url=base_url, api_key=decrypt_secret(key), model=model, timeout_seconds=120)
+    base_url, key, model, quick = db.execute(
+        "select base_url, api_key_enc, model, quick_extra_body from llm_config"
+    ).fetchone()
+    llm = LLMSettings(
+        base_url=base_url,
+        api_key=decrypt_secret(key),
+        model=model,
+        timeout_seconds=120,
+        # e.g. EVAL_QUICK_BODY='{"chat_template_kwargs": {"enable_thinking": false}}'
+        quick_extra_body=os.environ.get("EVAL_QUICK_BODY", quick or ""),
+    )
     embedding = EmbeddingSettings(
         provider=os.environ.get("EVAL_EMBED_PROVIDER", "tei"),
         base_url=os.environ.get("EVAL_EMBED_URL", "http://embed:80"),

@@ -14,6 +14,7 @@ streaming, and the loop that runs the tools the model asks for (see
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -83,6 +84,26 @@ class LLMError(Exception):
     """The model could not answer; the message is safe to show in chat."""
 
 
+# Request fields the client sets itself; extra fields may not replace them.
+_RESERVED_FIELDS = frozenset({"model", "messages", "stream", "tools", "max_tokens"})
+
+
+def parse_extra_body(text: str) -> dict[str, Any]:
+    """The JSON object in `text` ({} when empty); ValueError if it is not one."""
+    if not text.strip():
+        return {}
+    try:
+        value = json.loads(text)
+    except ValueError as exc:
+        raise ValueError(f"not valid JSON: {exc}") from None
+    if not isinstance(value, dict):
+        raise ValueError("must be a JSON object, like {\"key\": \"value\"}")
+    clash = sorted(_RESERVED_FIELDS & value.keys())
+    if clash:
+        raise ValueError(f"cannot set {', '.join(clash)}")
+    return value
+
+
 class LLMChat:
     """One chat-completions endpoint and the model to ask there."""
 
@@ -96,9 +117,12 @@ class LLMChat:
         timeout_seconds: float = 60.0,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        quick_extra_body: dict[str, Any] | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self.model = model
+        # Sent with quick side jobs (`complete(quick=True)`).
+        self.quick_extra_body = dict(quick_extra_body or {})
         self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         self.timeout_seconds = timeout_seconds
         self._max_tokens = max_tokens
@@ -134,6 +158,7 @@ class LLMChat:
             timeout_seconds=settings.timeout_seconds,
             max_tokens=settings.max_tokens,
             temperature=settings.temperature,
+            quick_extra_body=_extra_body_or_none(settings.quick_extra_body),
             http_client=http_client,
         )
 
@@ -169,21 +194,24 @@ class LLMChat:
         timer: TurnTimer | None = None,
         model: str | None = None,
         max_tokens: int | None = None,
+        quick: bool = False,
     ) -> str:
         """The model's answer. With `on_text`, it is streamed: called with the text so far.
 
         Text the model writes before calling a tool stays part of the answer.
         `model` and `max_tokens` override the configured ones for this call,
-        as for a side job given to a cheaper model.
+        as for a side job given to a cheaper model. `quick` marks such a side
+        job: its request carries the configured extra fields for them.
         """
         messages = list(messages)
         said: list[str] = []
+        extra = self.quick_extra_body if quick else None
         try:
             for tool_round in range(MAX_TOOL_ROUNDS + 1):
                 if timer is not None:
                     timer.rounds += 1
                 text, calls = await self._round(
-                    messages, said, on_text, tools, timer, model, max_tokens
+                    messages, said, on_text, tools, timer, model, max_tokens, extra
                 )
                 if text.strip():
                     said.append(text.strip())
@@ -272,9 +300,12 @@ class LLMChat:
         timer: TurnTimer | None,
         model: str | None,
         max_tokens: int | None,
+        extra_body: dict[str, Any] | None = None,
     ) -> tuple[str, list[ToolCall]]:
         """One completion: its text, and the tools it wants called."""
         options: dict = {}
+        if extra_body:
+            options["extra_body"] = extra_body
         if max_tokens or self._max_tokens:
             options["max_tokens"] = max_tokens or self._max_tokens
         if self._temperature is not None:
@@ -366,6 +397,15 @@ def _shared_http_client() -> httpx.AsyncClient:
         # The SDK sets its own timeouts per request.
         timeout=None,
     )
+
+
+def _extra_body_or_none(text: str) -> dict[str, Any] | None:
+    try:
+        return parse_extra_body(text) or None
+    except ValueError as exc:
+        # Checked when saved; a bad value only loses the extra fields.
+        log.warning("Ignoring the extra request fields for quick jobs: %s", exc)
+        return None
 
 
 class LLMService:

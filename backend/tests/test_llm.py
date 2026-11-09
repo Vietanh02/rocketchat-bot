@@ -150,6 +150,19 @@ async def set_llm(runtime, **fields):
 
 
 def _completion(body: dict, content: str) -> httpx.Response:
+    if body.get("stream"):
+        event = {
+            "id": "side",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": body["model"],
+            "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}],
+        }
+        return httpx.Response(
+            200,
+            content=f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n".encode(),
+            headers={"content-type": "text/event-stream"},
+        )
     return httpx.Response(
         200,
         json={
@@ -414,6 +427,26 @@ async def test_the_api_never_returns_the_key(admin_client, app_env):
     assert body["has_api_key"] is True and body["model"] == "glm-5"
     body = (await admin_client.put("/api/llm", json={"api_key": ""})).json()
     assert body["has_api_key"] is False and body["configured"] is False
+
+
+async def test_extra_fields_for_quick_jobs_must_be_a_json_object(admin_client):
+    for bad in ('{"a": ', '["x"]', '{"model": "other"}'):
+        response = await admin_client.put("/api/llm", json={"quick_extra_body": bad})
+        assert response.status_code == 422, bad
+    fields = '{"chat_template_kwargs": {"enable_thinking": false}}'
+    body = (await admin_client.put("/api/llm", json={"quick_extra_body": fields})).json()
+    assert body["quick_extra_body"] == fields
+    body = (await admin_client.put("/api/llm", json={"quick_extra_body": ""})).json()
+    assert body["quick_extra_body"] == ""
+
+
+async def test_quick_jobs_carry_the_extra_fields_and_answers_do_not(app_env, gateway, model):
+    await set_llm(app_env, quick_extra_body='{"reasoning_effort": "low"}')
+    chat = app_env.bot.responder.llm.chat_for((await app_env.config_store.current()).llm)
+    await chat.complete([{"role": "user", "content": "hi"}], quick=True)
+    await chat.complete([{"role": "user", "content": "hi"}])
+    assert model.requests[0]["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in model.requests[1]
 
 
 async def test_turning_the_model_on_needs_a_complete_configuration(admin_client):

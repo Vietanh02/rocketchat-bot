@@ -76,6 +76,8 @@ export interface LLMConfig {
   temperature: number | null;
   history_messages: number;
   format_for_rocketchat: boolean;
+  /** JSON object sent with quick side jobs; "" for none. */
+  quick_extra_body: string;
   has_api_key: boolean;
   configured: boolean;
   default_system_prompt: string;

@@ -45,7 +45,10 @@ WINDOW_BLOCKS = 120
 # Each block is shown up to this long; the model needs the gist, not all of it.
 PREVIEW_CHARS = 400
 INDEX_TIMEOUT_SECONDS = 180.0
-INDEX_MAX_TOKENS = 6000
+# A reasoning model's thinking counts against this too.
+INDEX_MAX_TOKENS = 12000
+# Windows of one document indexed at the same time.
+INDEX_PARALLEL = 3
 JUDGE_TIMEOUT_SECONDS = 8.0
 JUDGE_PREVIEW_CHARS = 700
 MAX_KEYWORDS = 20
@@ -94,6 +97,33 @@ def _json_object(raw: str) -> dict | None:
     except ValueError:
         return None
     return data if isinstance(data, dict) else None
+
+
+def _sections_of(raw: str) -> tuple[list | None, bool]:
+    """The "sections" list in the model's answer, and whether the answer was whole.
+
+    An answer cut off by the token limit still gives the sections written
+    out in full before the cut.
+    """
+    data = _json_object(raw)
+    if data is not None:
+        return data.get("sections"), True
+    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.S)
+    match = re.search(r'"sections"\s*:\s*\[', raw)
+    if match is None:
+        return None, False
+    decoder = json.JSONDecoder()
+    items: list = []
+    at = match.end()
+    while True:
+        while at < len(raw) and raw[at] in " \t\r\n,":
+            at += 1
+        try:
+            item, at = decoder.raw_decode(raw, at)
+        except ValueError:
+            break
+        items.append(item)
+    return items, False
 
 
 def _clean(value: object, limit: int) -> str:
@@ -147,12 +177,14 @@ def preview(text: str, blocks: Sequence[Block], first: int, last: int) -> str:
     return "\n\n".join(lines)
 
 
-def repair(raw_sections: object, first: int, last: int) -> list[Section]:
+def repair(raw_sections: object, first: int, last: int, *, whole: bool = True) -> list[Section]:
     """The model's sections over blocks first..last (0-based), made valid.
 
     The model numbers blocks from 1. Sections are sorted, clipped to the
     window, and made to follow one another with no gap or overlap; ones
-    left empty are dropped.
+    left empty are dropped. With `whole` False (the answer was cut off),
+    the last section is not stretched to the end of the window: the
+    blocks after it were never described.
     """
     if not isinstance(raw_sections, list):
         return []
@@ -192,7 +224,8 @@ def repair(raw_sections: object, first: int, last: int) -> list[Section]:
     if not sections:
         return []
     sections[0].first = first
-    sections[-1].last = last
+    if whole:
+        sections[-1].last = last
     return sections
 
 
@@ -207,37 +240,73 @@ async def index_sections(
     """Sections of the whole document, and how many windows fell back to headings."""
     if not blocks:
         return [], 0
-    sections: list[Section] = []
-    fallbacks = 0
-    for first, last in windows(text, blocks):
-        found: list[Section] = []
-        try:
-            async with asyncio.timeout(INDEX_TIMEOUT_SECONDS):
-                raw = await chat.complete(
-                    [
-                        {"role": "system", "content": INDEX_PROMPT.format(first=first + 1, last=last + 1)},
-                        {
-                            "role": "user",
-                            "content": f"Document: {title}\n\n{preview(text, blocks, first, last)}",
-                        },
-                    ],
-                    model=model or None,
-                    max_tokens=INDEX_MAX_TOKENS,
-                )
-            data = _json_object(raw)
-            found = repair(data.get("sections") if data else None, first, last)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - this window falls back to its headings
-            log.warning("Indexing blocks %d–%d of %r failed: %s", first + 1, last + 1, title, exc)
-        if not found:
-            fallbacks += 1
-            window = heading_sections(text, blocks[first : last + 1])
-            found = [Section(s.first + first, s.last + first, s.title) for s in window]
-        sections.extend(found)
-    if fallbacks and fallbacks == len(windows(text, blocks)):
+    ranges = windows(text, blocks)
+    limit = asyncio.Semaphore(INDEX_PARALLEL)
+
+    async def one(first: int, last: int) -> tuple[list[Section], bool]:
+        async with limit:
+            found = await _index_window(chat, text, blocks, first, last, title=title, model=model)
+        if found and found[-1].last < last:
+            # Cut off: the rest of the window goes by its headings.
+            rest = heading_sections(text, blocks[found[-1].last + 1 : last + 1])
+            offset = found[-1].last + 1
+            found += [Section(s.first + offset, s.last + offset, s.title) for s in rest]
+        if found:
+            return found, False
+        window = heading_sections(text, blocks[first : last + 1])
+        return [Section(s.first + first, s.last + first, s.title) for s in window], True
+
+    results = await asyncio.gather(*(one(first, last) for first, last in ranges))
+    fallbacks = sum(fell_back for _, fell_back in results)
+    if fallbacks and fallbacks == len(ranges):
         raise IndexingError("the language model returned no usable sections")
-    return sections, fallbacks
+    return [section for found, _ in results for section in found], fallbacks
+
+
+async def _index_window(
+    chat: LLMChat,
+    text: str,
+    blocks: Sequence[Block],
+    first: int,
+    last: int,
+    *,
+    title: str,
+    model: str | None,
+) -> list[Section]:
+    """The model's sections for blocks first..last; [] if it gave none usable."""
+    try:
+        async with asyncio.timeout(INDEX_TIMEOUT_SECONDS):
+            raw = await chat.complete(
+                [
+                    {"role": "system", "content": INDEX_PROMPT.format(first=first + 1, last=last + 1)},
+                    {
+                        "role": "user",
+                        "content": f"Document: {title}\n\n{preview(text, blocks, first, last)}",
+                    },
+                ],
+                # Streamed, so the gateway's timeout applies between tokens:
+                # a long answer, or a long think before it, is not cut off.
+                on_text=_ignore,
+                model=model or None,
+                max_tokens=INDEX_MAX_TOKENS,
+                quick=True,
+            )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - this window falls back to its headings
+        log.warning("Indexing blocks %d–%d of %r failed: %s", first + 1, last + 1, title, exc)
+        return []
+    items, whole = _sections_of(raw)
+    if not whole:
+        log.info("The index of blocks %d–%d of %r was cut off; keeping what came", first + 1, last + 1, title)
+    found = repair(items, first, last, whole=whole)
+    if not found:
+        log.warning("No usable sections for blocks %d–%d of %r: %r", first + 1, last + 1, title, raw[:300])
+    return found
+
+
+def _ignore(_text: str) -> None:
+    pass
 
 
 async def judge(
@@ -263,6 +332,7 @@ async def judge(
                 ],
                 model=model or None,
                 max_tokens=200,
+                quick=True,
             )
     except asyncio.CancelledError:
         raise
