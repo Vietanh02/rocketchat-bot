@@ -22,6 +22,7 @@ from app.integrations.templating import (
     render_json_object,
 )
 from app.models import AuthType, Integration
+from app.net import describe_error, httpx_verify, proxy_for, route
 from app.security import decrypt_secret
 
 log = logging.getLogger(__name__)
@@ -230,6 +231,10 @@ async def assert_url_allowed(url: str) -> None:
             type=socket.SOCK_STREAM,
         )
     except socket.gaierror as exc:
+        if proxy_for(url):
+            # Behind a proxy the container often cannot resolve outside names;
+            # the proxy resolves them, and it is what decides where they go.
+            return
         raise IntegrationError(f"cannot resolve host {host!r}: {exc}") from exc
 
     for info in infos:
@@ -347,12 +352,15 @@ async def execute_integration(
         client = client or httpx.AsyncClient(
             timeout=spec.timeout_seconds or get_settings().integration_timeout_seconds,
             follow_redirects=False,
+            verify=httpx_verify(),
         )
         started = asyncio.get_running_loop().time()
         try:
             response = await client.request(method, url, **request_kwargs)
         except httpx.HTTPError as exc:
-            raise IntegrationError(f"request to {url} failed: {exc}") from exc
+            raise IntegrationError(
+                f"request to {url} failed ({route(url)}): {describe_error(exc)}"
+            ) from exc
         finally:
             if owns_client:
                 await client.aclose()

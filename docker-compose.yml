@@ -5,10 +5,30 @@
 #
 # The two stacks are joined by the external network below, so the bot can
 # reach Rocket.Chat at http://rocketchat:3000 instead of going via the host.
+#
+# Settings for the whole stack go in a .env file next to this one (see
+# .env.example): the proxy, APP_DEBUG and APP_TLS_VERIFY.
+
+# Outgoing proxy, from .env. The containers' own names never go through it;
+# NO_PROXY in .env adds to that list (e.g. a Rocket.Chat on the LAN).
+x-proxy-env: &proxy-env
+  HTTP_PROXY: ${HTTP_PROXY:-}
+  HTTPS_PROXY: ${HTTPS_PROXY:-${HTTP_PROXY:-}}
+  NO_PROXY: localhost,127.0.0.1,::1,backend,portal,qdrant,embed,rocketchat,host.docker.internal${NO_PROXY:+,}${NO_PROXY:-}
+
+# The same proxy while images are built (pip install, npm ci).
+x-proxy-build-args: &proxy-build-args
+  HTTP_PROXY: ${HTTP_PROXY:-}
+  HTTPS_PROXY: ${HTTPS_PROXY:-${HTTP_PROXY:-}}
+  NO_PROXY: ${NO_PROXY:-}
+  # "false" also skips certificate checks of pip and npm downloads.
+  BUILD_TLS_VERIFY: ${APP_TLS_VERIFY:-true}
 
 services:
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      args: *proxy-build-args
     # Named, so images loaded from a release package are used as they are
     # (`docker compose up -d --no-build`). BOT_VERSION defaults to "latest".
     image: rocketchat-bot-backend:${BOT_VERSION:-latest}
@@ -18,6 +38,12 @@ services:
       - path: ./backend/.env
         required: false
     environment:
+      <<: *proxy-env
+      # Troubleshooting: APP_DEBUG=true docker compose up -d backend
+      # (DEBUG logs, tracebacks, the cause of errors shown in chat).
+      APP_DEBUG: ${APP_DEBUG:-false}
+      # false: do not check HTTPS/WSS certificates (a proxy that re-signs them).
+      APP_TLS_VERIFY: ${APP_TLS_VERIFY:-true}
       # Container-to-container addresses override whatever .env holds.
       APP_DATABASE_URL: sqlite+aiosqlite:////app/data/bot.db
       APP_RC_REST_URL: ${APP_RC_REST_URL:-http://rocketchat:3000}
@@ -75,6 +101,8 @@ services:
     mem_limit: 1536m
     # Two tokenizer workers and small batches keep warm-up under the limit;
     # the defaults (one worker per core, 16k-token batches) get it OOM-killed.
+    # Downloads the model from Hugging Face on first start, through the proxy.
+    environment: *proxy-env
     command: ["--model-id", "intfloat/multilingual-e5-small", "--tokenization-workers", "2", "--max-batch-tokens", "4096", "--max-client-batch-size", "64"]
     volumes:
       - embed_models:/data
@@ -84,7 +112,9 @@ services:
       - "80"
 
   portal:
-    build: ./portal
+    build:
+      context: ./portal
+      args: *proxy-build-args
     image: rocketchat-bot-portal:${BOT_VERSION:-latest}
     restart: unless-stopped
     depends_on:

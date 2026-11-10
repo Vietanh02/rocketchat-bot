@@ -89,6 +89,25 @@ Send the bot a DM saying `help` to confirm.
 > docker compose up -d --no-build
 > ```
 
+### Proxy, certificates and debugging
+
+Stack-wide settings go in a `.env` next to `docker-compose.yml` (copy `.env.example`):
+
+- `HTTP_PROXY` / `HTTPS_PROXY`: the outgoing proxy, used by the backend, by `embed` (model
+  download) and while building the images. `HTTPS_PROXY` defaults to `HTTP_PROXY`.
+- `NO_PROXY`: hosts reached directly. The containers' own names are always on the list;
+  this adds to it (a Rocket.Chat on the LAN, say).
+- `APP_TLS_VERIFY=false`: do not check HTTPS/WSS certificates, for a proxy that re-signs
+  traffic. A warning is logged at startup.
+- `APP_DEBUG=true` (or `APP_DEBUG=true docker compose up -d backend` for one run): DEBUG
+  logs, a traceback with every warning and error, the cause of a failed call in the chat
+  reply, and tracebacks in portal API errors.
+
+`docker compose exec backend python -m app.doctor` checks every connection (database,
+Rocket.Chat REST and realtime, LLM gateway, embedding, reranker, Qdrant, MCP servers,
+integration addresses). Each line says whether it goes direct or via the proxy, and for a
+failure, the whole chain of causes. Add `--chat` to also ask the model one question.
+
 ## Local development
 
 ```bash

@@ -168,9 +168,13 @@ async def test_llm(payload: LLMTestRequest, _: AdminUser, session: SessionDep) -
     try:
         raw = await chat.complete(chat.build_messages(payload.prompt, [], bot_name="the bot"))
     except LLMError as exc:
+        text = str(exc)
+        # The admin testing the gateway needs the cause, debug mode or not.
+        if exc.detail and exc.detail not in text:
+            text = f"{text}: {exc.detail}"
         return LLMTestResult(
             ok=False,
-            message=str(exc)[:1].upper() + str(exc)[1:],
+            message=text[:1].upper() + text[1:],
             duration_ms=int((time.monotonic() - started) * 1000),
         )
     finally:

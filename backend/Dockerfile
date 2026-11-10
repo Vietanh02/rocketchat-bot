@@ -8,7 +8,14 @@ WORKDIR /app
 
 # Dependencies first, so code edits do not invalidate the install layer.
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# HTTP_PROXY / HTTPS_PROXY / NO_PROXY reach pip as build args (docker compose
+# passes them from .env). BUILD_TLS_VERIFY=false trusts PyPI without checking
+# its certificate, for a proxy that re-signs it.
+ARG BUILD_TLS_VERIFY=true
+RUN if [ "$BUILD_TLS_VERIFY" = "false" ]; then \
+      export PIP_TRUSTED_HOST="pypi.org files.pythonhosted.org"; \
+    fi; \
+    pip install --no-cache-dir -r requirements.txt
 
 COPY alembic.ini ./
 COPY alembic ./alembic

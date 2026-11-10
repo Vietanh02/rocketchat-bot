@@ -113,6 +113,39 @@ Sửa `backend/.env`:
 
 Các biến `APP_RC_*` và `APP_LLM_*` có thể để trống; nhập trên portal tiện hơn.
 
+### 5.1 Proxy, chứng chỉ và chế độ debug (file `.env` ở thư mục gốc)
+
+Các thiết lập cho cả stack nằm trong `.env` cạnh `docker-compose.yml` (khác với `backend/.env`):
+
+```bash
+cp .env.example .env
+```
+
+| Biến | Ý nghĩa |
+|---|---|
+| `HTTP_PROXY` | Proxy đi ra ngoài, ví dụ `http://proxy.congty.vn:3128` (có tài khoản: `http://user:pass@proxy:3128`). Dùng cho backend (LLM gateway, MCP, integration, skill/script), cho `embed` (tải model từ Hugging Face) và khi build image (pip, npm). |
+| `HTTPS_PROXY` | Proxy cho URL `https://`. Bỏ trống thì lấy theo `HTTP_PROXY`. |
+| `NO_PROXY` | Các host đi thẳng, không qua proxy, cách nhau dấu phẩy. Tên container (`backend`, `qdrant`, `embed`, `rocketchat`, `host.docker.internal`, `localhost`) **đã có sẵn**; biến này chỉ thêm vào. Rocket.Chat hay gateway nằm trong LAN thì thêm vào đây, ví dụ `chat.congty.vn,.noibo.congty.vn,10.1.2.3`. Dải IP kiểu `10.0.0.0/8` không phải thư viện nào cũng hiểu: ghi tên host hoặc từng IP. |
+| `APP_TLS_VERIFY` | `false` = **không kiểm tra chứng chỉ** HTTPS/WSS (gateway, Rocket.Chat, MCP, integration; pip/npm khi build; Node trong MCP stdio). Chỉ dùng khi proxy ký lại chứng chỉ bằng CA riêng. Mặc định `true`. Khi tắt, log backend có cảnh báo lúc khởi động. |
+| `APP_DEBUG` | `true` = chế độ gỡ lỗi (mục 8.5). Mặc định `false`. |
+
+```bash
+docker compose up -d --build            # sau khi sửa .env, tạo lại container
+docker compose exec backend python -m app.doctor   # kiểm tra từng kết nối (mục 8.5)
+```
+
+Ghi chú:
+- Khi có proxy, container thường **không phân giải được** tên miền bên ngoài. Bot vẫn cho gọi các URL đi qua proxy (proxy tự phân giải); URL đi thẳng mà không phân giải được thì báo lỗi `cannot resolve host`.
+- `docker pull` (image `qdrant`, `text-embeddings-inference`, `python`, `node`, `nginx`) do Docker daemon thực hiện, **không** đọc file `.env`. Đặt proxy cho daemon:
+  ```bash
+  sudo mkdir -p /etc/systemd/system/docker.service.d
+  printf '[Service]\nEnvironment="HTTP_PROXY=http://proxy:3128" "HTTPS_PROXY=http://proxy:3128" "NO_PROXY=localhost,127.0.0.1"\n' \
+    | sudo tee /etc/systemd/system/docker.service.d/http-proxy.conf
+  sudo systemctl daemon-reload && sudo systemctl restart docker
+  ```
+  Cài từ gói phát hành (cách B) thì không cần pull image của bot, nhưng vẫn cần `qdrant` và `text-embeddings-inference` nếu gói chưa có.
+- `embed` (TEI) không có tuỳ chọn tắt kiểm tra chứng chỉ. Nếu proxy ký lại chứng chỉ và `embed` không tải được model, dùng embedding qua gateway (6.3), hoặc chép sẵn model vào volume `embed_models`.
+
 ```bash
 docker compose up -d --build            # cách B: docker compose up -d --no-build
 docker compose ps
@@ -214,6 +247,37 @@ Mỗi lần nạp tạo (hoặc cập nhật) một **collection**:
   Bỏ tick nếu cần nạp nhanh; có thể bấm **Index again** cho từng tài liệu sau.
 - Xoá cả collection: nút **Remove** trong bảng Collections.
 
+### 8.5 Chế độ debug và lệnh chẩn đoán
+
+**Lệnh chẩn đoán** — kiểm tra lần lượt DB, Rocket.Chat (REST, đăng nhập bot, realtime), LLM gateway, embedding, reranker, Qdrant, từng MCP server và địa chỉ của từng integration. Mỗi dòng ghi đích đến đi **thẳng** hay **qua proxy**, và khi lỗi thì ghi cả chuỗi nguyên nhân (proxy từ chối, chứng chỉ sai, tên miền không phân giải được…). Không thay đổi gì, không tốn token (trừ khi thêm `--chat`):
+
+```bash
+docker compose exec backend python -m app.doctor           # thêm --chat để hỏi thử model một câu
+```
+```
+[ OK ] Rocket.Chat REST  http://rocketchat:3000  [direct]
+       Rocket.Chat 7.10.0 (35 ms)
+[FAIL] LLM gateway  https://gateway.example.com/v1  [via proxy http://proxy:3128]
+       ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain
+```
+Lệnh trả mã thoát 1 nếu có mục lỗi.
+
+**Chế độ debug** — bật bằng `APP_DEBUG=true` trong `.env`, hoặc chỉ một lần:
+
+```bash
+APP_DEBUG=true docker compose up -d backend    # bật
+docker compose up -d backend                   # tắt (theo .env)
+docker compose logs -f backend
+```
+
+Khi bật:
+- log của bot ở mức DEBUG; mỗi cảnh báo/lỗi xảy ra trong lúc xử lý exception có kèm **traceback** (biết lỗi ở file, dòng nào);
+- tin trả lời lỗi trong chat có thêm nguyên nhân, ví dụ `:warning: could not reach the language model (APIConnectionError: Connection error. <- ConnectError: …)`;
+- lỗi 500 của API portal trả về traceback;
+- `/healthz` có `"debug": true`.
+
+Không cần debug thì log vẫn ghi nguyên nhân gốc của lỗi kết nối (kèm `direct`/`via proxy …`); trang **Language model → Test** trên portal cũng hiện nguyên nhân. Tắt debug khi chạy thật: tin lỗi trong chat có thể lộ địa chỉ nội bộ.
+
 ## 9. Đóng gói một phiên bản
 
 1. Tăng số phiên bản ở **cả bốn chỗ**, cùng một giá trị `x.y.z`:
@@ -294,6 +358,8 @@ curl -s http://localhost:8081/healthz
 | Log có `Reranking passages failed … 424` | Reranker trỏ vào `embed`. Đặt reranker về **none** (6.3). |
 | Portal không nhận được key đã lưu (không giải mã được) | `APP_SECRET_KEY` đã bị đổi. Đặt lại giá trị cũ, hoặc nhập lại các key trên portal. |
 | Tải tài liệu lớn bị lỗi 413 | Portal nhận tối đa 20 file × 20 MB mỗi lần. File lớn hơn thì tách nhỏ. |
+| Log có `could not reach the language model at … (via proxy …)`, hoặc lệnh chẩn đoán báo `FAIL` | Đọc chuỗi nguyên nhân: `ProxyError`/`407` → sai proxy hoặc tài khoản proxy; `CERTIFICATE_VERIFY_FAILED` → proxy ký lại chứng chỉ, đặt `APP_TLS_VERIFY=false` (5.1); `Name or service not known` khi `[direct]` → host cần đi qua proxy nhưng đang nằm trong `NO_PROXY`, hoặc ngược lại. |
+| Bot không kết nối được Rocket.Chat sau khi thêm proxy | Rocket.Chat nằm trong LAN nhưng đang bị đẩy qua proxy. Thêm host của nó vào `NO_PROXY` trong `.env` (5.1), rồi `docker compose up -d backend`. |
 | `docker compose build` lỗi DNS (`Temporary failure in name resolution`) | Build bằng mạng của host, rồi khởi động không build lại: `docker build --network=host -t rocketchat-bot-backend:latest ./backend` (làm tương tự cho `./portal`), sau đó `docker compose up -d --no-build`. |
 
 ## 13. Bảo mật

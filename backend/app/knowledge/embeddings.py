@@ -33,6 +33,7 @@ from app.bot.config_store import EmbeddingSettings
 from app.knowledge.breaker import Breaker
 from app.integrations.executor import IntegrationError, assert_url_allowed
 from app.models import EmbeddingCache
+from app.net import describe_error
 
 log = logging.getLogger(__name__)
 
@@ -268,7 +269,9 @@ class Embedder:
         except httpx.TimeoutException as exc:
             raise EmbeddingError(f"the embedding server did not answer within {timeout:g}s") from exc
         except httpx.HTTPError as exc:
-            raise EmbeddingError(f"could not reach the embedding server: {exc}") from exc
+            raise EmbeddingError(
+                f"could not reach the embedding server: {describe_error(exc)}"
+            ) from exc
         if response.status_code >= 400:
             raise EmbeddingError(
                 f"the embedding server answered HTTP {response.status_code}: {_error_text(response)}"
@@ -334,7 +337,7 @@ class Reranker:
                 timeout=min(settings.timeout_seconds, QUERY_TIMEOUT_SECONDS),
             )
         except httpx.HTTPError as exc:
-            raise EmbeddingError(f"could not reach the reranker: {exc}") from exc
+            raise EmbeddingError(f"could not reach the reranker: {describe_error(exc)}") from exc
         if response.status_code >= 400:
             raise EmbeddingError(
                 f"the reranker answered HTTP {response.status_code}: {_error_text(response)}"

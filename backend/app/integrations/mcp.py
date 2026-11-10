@@ -25,6 +25,7 @@ from typing import Any
 
 from app.integrations.executor import IntegrationError, assert_url_allowed
 from app.models import McpServer, McpTransport
+from app.net import describe_error, httpx_verify, proxy_env
 from app.security import decrypt_secret
 
 log = logging.getLogger(__name__)
@@ -121,8 +122,10 @@ def _default_client(spec: McpServerSpec):
     if spec.transport == McpTransport.stdio.value:
         if not spec.command:
             raise McpError("no command is set")
+        # The SDK passes on only HOME, PATH and the like; the proxy settings
+        # go too, with the server's own variables over them.
         params = StdioServerParameters(
-            command=spec.command, args=list(spec.args), env=dict(spec.env) or None
+            command=spec.command, args=list(spec.args), env={**proxy_env(), **dict(spec.env)} or None
         )
         return Client(params, read_timeout_seconds=spec.timeout_seconds, client_info=info, cache=None)
     if not spec.url:
@@ -134,6 +137,7 @@ def _default_client(spec: McpServerSpec):
         headers=dict(spec.headers),
         timeout=spec.timeout_seconds,
         follow_redirects=False,
+        verify=httpx_verify(),
     )
     return Client(
         streamable_http_client(spec.url, http_client=http),
@@ -161,12 +165,7 @@ async def _guard(spec: McpServerSpec) -> None:
 
 
 def _describe(exc: BaseException) -> str:
-    # anyio groups hide the cause one level down.
-    inner = getattr(exc, "exceptions", None)
-    if inner:
-        return _describe(inner[0])
-    text = str(exc).strip()
-    return text or exc.__class__.__name__
+    return describe_error(exc)
 
 
 async def list_tools(spec: McpServerSpec) -> list[ListedTool]:

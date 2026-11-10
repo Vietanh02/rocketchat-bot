@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -26,7 +27,7 @@ from app.api import (
     skills as skills_api,
     tasks,
 )
-from app import __version__
+from app import __version__, net
 from app.bootstrap import run_bootstrap
 from app.config import get_settings
 from app.db import SessionLocal
@@ -35,19 +36,41 @@ from app.runtime import Runtime
 log = logging.getLogger(__name__)
 
 
-def configure_logging(level: str) -> None:
+class _AttachTraceback(logging.Filter):
+    """In debug mode, a warning or error logged while handling an exception
+    carries that exception's traceback, so the log shows where it came from."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING and not record.exc_info:
+            info = sys.exc_info()
+            if info[0] is not None:
+                record.exc_info = info
+        return True
+
+
+def configure_logging(level: str, *, debug: bool = False) -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     )
     # The DDP reader logs every frame at DEBUG; that is too much even for us.
     logging.getLogger("websockets.client").setLevel(logging.WARNING)
+    if debug:
+        # The bot's own messages in full; libraries stay at INFO, which for
+        # httpx is one line per request with its status.
+        logging.getLogger().setLevel(min(logging.getLogger().level, logging.INFO))
+        logging.getLogger("app").setLevel(logging.DEBUG)
+        for handler in logging.getLogger().handlers:
+            if not any(isinstance(f, _AttachTraceback) for f in handler.filters):
+                handler.addFilter(_AttachTraceback())
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, debug=settings.debug)
+    log.info("Rocket.Chat bot %s starting%s", __version__, " in DEBUG mode" if settings.debug else "")
+    net.log_summary()
 
     await run_bootstrap(SessionLocal, settings)
     runtime = Runtime.build(SessionLocal)
@@ -65,8 +88,10 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Rocket.Chat Bot Portal",
         description="Configure the chatbot, its API integrations and reminders.",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
+        # Unhandled errors answer with their traceback instead of a bare 500.
+        debug=settings.debug,
     )
 
     app.add_middleware(
@@ -101,6 +126,7 @@ def create_app() -> FastAPI:
         return {
             "status": "ok",
             "version": __version__,
+            "debug": settings.debug,
             "bot_connected": bool(runtime and runtime.bot.status.connected),
             "scheduler_running": bool(runtime and runtime.scheduler.running),
         }

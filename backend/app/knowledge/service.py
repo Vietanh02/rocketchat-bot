@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.config_store import EmbeddingSettings
 from app.config import get_settings
+from app.net import httpx_verify
 from app.knowledge.embeddings import Embedder, Reranker, VectorCache, _UrlGuard
 from app.knowledge.vectorstore import QdrantStore, VectorStore
 
@@ -56,6 +57,7 @@ class KnowledgeService:
             self._http = httpx.AsyncClient(
                 limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
                 timeout=30.0,
+                verify=httpx_verify(),
             )
         return self._http
 

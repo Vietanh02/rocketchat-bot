@@ -26,6 +26,8 @@ from typing import Any
 import websockets
 from websockets.exceptions import ConnectionClosed
 
+from app.net import describe_error, route, websocket_ssl
+
 log = logging.getLogger(__name__)
 
 # Subscribing to this pseudo-room id streams every message visible to the
@@ -168,8 +170,8 @@ class DDPClient:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - we retry on anything
-                self.last_error = str(exc)
-                log.warning("DDP session ended: %s", exc)
+                self.last_error = describe_error(exc)
+                log.warning("DDP session ended: %s", self.last_error)
             finally:
                 self.connected.clear()
                 self._fail_pending("connection closed")
@@ -193,9 +195,13 @@ class DDPClient:
     # ----------------------------------------------------------------- #
 
     async def _session(self) -> None:
-        log.info("Connecting to Rocket.Chat realtime API at %s", self.ws_url)
+        log.info("Connecting to Rocket.Chat realtime API at %s (%s)", self.ws_url, route(self.ws_url))
+        # The proxy, if any, comes from HTTPS_PROXY / HTTP_PROXY and NO_PROXY.
         async with websockets.connect(
-            self.ws_url, ping_interval=None, max_size=4 * 1024 * 1024
+            self.ws_url,
+            ping_interval=None,
+            max_size=4 * 1024 * 1024,
+            ssl=websocket_ssl(self.ws_url),
         ) as ws:
             self._ws = ws
             await self._send({"msg": "connect", "version": "1", "support": ["1"]})

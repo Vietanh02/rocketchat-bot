@@ -27,6 +27,7 @@ from openai import (
     APIStatusError,
     APITimeoutError,
     AsyncOpenAI,
+    DefaultAsyncHttpxClient,
 )
 
 from app.agent.tools import (
@@ -40,6 +41,8 @@ from app.agent.prompt import build_messages
 from app.agent.timing import ToolTiming, TurnTimer
 from app.agent.tools.integrations import Toolbox
 from app.bot.config_store import LLMSettings
+from app.config import get_settings
+from app.net import describe_error, httpx_verify, route
 
 log = logging.getLogger(__name__)
 
@@ -81,7 +84,17 @@ __all__ = [
 
 
 class LLMError(Exception):
-    """The model could not answer; the message is safe to show in chat."""
+    """The model could not answer; the message is safe to show in chat.
+
+    `detail` is the underlying cause (the transport error, the gateway's
+    own message), for logs and the portal; chat shows it in debug mode.
+    """
+
+    def __init__(self, message: str, detail: str | None = None) -> None:
+        if detail and get_settings().debug:
+            message = f"{message} ({detail})"
+        super().__init__(message)
+        self.detail = detail
 
 
 # Request fields the client sets itself; extra fields may not replace them.
@@ -127,6 +140,10 @@ class LLMChat:
         self.timeout_seconds = timeout_seconds
         self._max_tokens = max_tokens
         self._temperature = temperature
+        self.base_url = base_url
+        if http_client is None:
+            # The SDK's own client, with its limits, but our certificate rule.
+            http_client = DefaultAsyncHttpxClient(verify=httpx_verify())
         self._client = AsyncOpenAI(
             base_url=base_url,
             api_key=api_key,
@@ -242,16 +259,22 @@ class LLMChat:
                 f"the language model did not answer within {self.timeout_seconds:g}s"
             ) from None
         except APIConnectionError as exc:
-            log.warning("Could not reach the language model: %s", exc)
-            raise LLMError("could not reach the language model") from None
+            detail = describe_error(exc)
+            log.warning(
+                "Could not reach the language model at %s (%s): %s",
+                self.base_url, route(self.base_url), detail,
+            )
+            raise LLMError("could not reach the language model", detail) from None
         except APIStatusError as exc:
             log.warning("Language model returned HTTP %s: %s", exc.status_code, exc.message)
             raise LLMError(
-                f"the language model returned an error (HTTP {exc.status_code})"
+                f"the language model returned an error (HTTP {exc.status_code})",
+                str(exc.message)[:500],
             ) from None
         except APIError as exc:
-            log.warning("Language model call failed: %s", exc)
-            raise LLMError("the language model call failed") from None
+            detail = describe_error(exc)
+            log.warning("Language model call failed: %s", detail)
+            raise LLMError("the language model call failed", detail) from None
         raise LLMError("the language model kept calling tools without answering")
 
     async def _run_tools(
@@ -396,6 +419,7 @@ def _shared_http_client() -> httpx.AsyncClient:
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20, keepalive_expiry=120),
         # The SDK sets its own timeouts per request.
         timeout=None,
+        verify=httpx_verify(),
     )
 
 

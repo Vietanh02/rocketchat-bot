@@ -24,6 +24,7 @@ from typing import Any, Protocol
 import httpx
 
 from app.knowledge.breaker import Breaker
+from app.net import describe_error
 
 log = logging.getLogger(__name__)
 
@@ -143,7 +144,7 @@ class QdrantStore:
                 timeout=min(self._timeout, timeout) if timeout else self._timeout,
             )
         except httpx.HTTPError as exc:
-            error = str(exc) or type(exc).__name__
+            error = describe_error(exc)
             self.breaker.failed(error)
             raise VectorStoreError(f"could not reach Qdrant: {error}") from exc
         self.breaker.succeeded()
@@ -168,7 +169,7 @@ class QdrantStore:
             response.raise_for_status()
             version = str(response.json().get("version", "?"))
         except (httpx.HTTPError, ValueError) as exc:
-            error = str(exc) or type(exc).__name__
+            error = describe_error(exc)
             self.breaker.failed(error)
             raise VectorStoreError(f"could not reach Qdrant: {error}") from exc
         self.breaker.succeeded()

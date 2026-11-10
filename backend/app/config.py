@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./data/bot.db"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     log_level: str = "INFO"
+    # Troubleshooting: DEBUG logs from the bot, a traceback with every warning
+    # and error, the cause of failed calls in chat, tracebacks in API errors.
+    debug: bool = False
+    # Check the certificates of HTTPS and WSS servers (the LLM gateway,
+    # Rocket.Chat, MCP, integrations). Turn off only behind a proxy that
+    # re-signs traffic with a certificate the bot cannot check.
+    tls_verify: bool = True
     jwt_algorithm: str = "HS256"
     jwt_ttl_minutes: int = 12 * 60
 

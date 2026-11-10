@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
+from app.net import proxy_env
 
 # Interpreters by extension. Anything else must be executable (shebang).
 INTERPRETERS: dict[str, list[str]] = {
@@ -164,6 +165,10 @@ def build_env(context: dict[str, Any]) -> dict[str, str]:
         # at exit; unbuffered, they can be shown in chat as they happen.
         "PYTHONUNBUFFERED": "1",
     }
+    # The proxy, so scripts that call out reach the same hosts the bot does.
+    env.update(proxy_env())
+    if not settings.tls_verify:
+        env["BOT_TLS_VERIFY"] = "0"
     for name in ("TZ", *settings.script_env_passthrough_list):
         if name in os.environ:
             env[name] = os.environ[name]

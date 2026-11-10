@@ -5,6 +5,7 @@ backend/**/__pycache__/
 *.pyc
 backend/data/
 backend/.env
+/.env
 backend/.pytest_cache/
 
 # Node

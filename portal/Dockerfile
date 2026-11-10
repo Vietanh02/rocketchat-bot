@@ -2,7 +2,11 @@
 FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
+# The proxy reaches npm as build args; BUILD_TLS_VERIFY=false skips its
+# certificate checks, for a proxy that re-signs them.
+ARG BUILD_TLS_VERIFY=true
+RUN if [ "$BUILD_TLS_VERIFY" = "false" ]; then npm config set strict-ssl false; fi; \
+    npm ci
 COPY . .
 RUN npm run build
 

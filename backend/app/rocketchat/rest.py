@@ -12,6 +12,8 @@ from typing import Any
 
 import httpx
 
+from app.net import describe_error, httpx_verify, route
+
 log = logging.getLogger(__name__)
 
 
@@ -31,7 +33,7 @@ class RocketChatRest:
         self.user_id = user_id
         self.auth_token = auth_token
         self._client = httpx.AsyncClient(
-            base_url=f"{self.base_url}/api/v1", timeout=timeout
+            base_url=f"{self.base_url}/api/v1", timeout=timeout, verify=httpx_verify()
         )
 
     async def aclose(self) -> None:
@@ -52,7 +54,10 @@ class RocketChatRest:
                 method, path, json=json, params=params, headers=self._headers()
             )
         except httpx.HTTPError as exc:
-            raise RocketChatError(f"{method} {path} failed: {exc}") from exc
+            raise RocketChatError(
+                f"{method} {self.base_url}{path} failed ({route(self.base_url)}): "
+                f"{describe_error(exc)}"
+            ) from exc
 
         try:
             payload = response.json()
