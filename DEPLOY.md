@@ -29,7 +29,7 @@ Mô hình ngôn ngữ (LLM) không chạy tại máy. Bot gọi một gateway t�
 - **Đĩa trống ≥ 10 GB:** khoảng 5 GB cho các image, phần còn lại cho dữ liệu và bản sao lưu.
 - Có Internet khi khởi động lần đầu:
   - tải image Docker;
-  - `embed` tải model từ Hugging Face (~470 MB) vào volume `embed_models`, chỉ lần đầu;
+  - `embed` tải model từ Hugging Face (~470 MB) vào volume `embed_models`, chỉ lần đầu. Mạng nội bộ không vào được huggingface.co thì dùng image có sẵn model (mục 5.2), hoặc cài từ gói phát hành: image `embed` trong gói đã có model;
   - gateway LLM.
 - Mở cổng **3000** (Rocket.Chat) và **8081** (portal) cho người dùng. Các cổng khác chỉ dùng trong mạng Docker.
 
@@ -55,6 +55,7 @@ rocketchat-bot-0.6.1/
   rocketchat-bot-0.6.1-source.tar.gz   mã nguồn (giải nén ra rocketchat-bot/)
   images/backend.tar.gz                image backend
   images/portal.tar.gz                 image portal
+  images/embed.tar.gz                  image embed, có sẵn model (không cần huggingface.co)
   images/qdrant_qdrant_v1.19.2.tar.gz  (khi đóng gói với --with-deps)
   DEPLOY.md  RELEASE.txt  SHA256SUMS
 ```
@@ -143,8 +144,26 @@ Ghi chú:
     | sudo tee /etc/systemd/system/docker.service.d/http-proxy.conf
   sudo systemctl daemon-reload && sudo systemctl restart docker
   ```
-  Cài từ gói phát hành (cách B) thì không cần pull image của bot, nhưng vẫn cần `qdrant` và `text-embeddings-inference` nếu gói chưa có.
-- `embed` (TEI) không có tuỳ chọn tắt kiểm tra chứng chỉ. Nếu proxy ký lại chứng chỉ và `embed` không tải được model, dùng embedding qua gateway (6.3), hoặc chép sẵn model vào volume `embed_models`.
+  Cài từ gói phát hành (cách B) thì không cần pull image của bot (backend, portal, embed), nhưng vẫn cần `qdrant` nếu gói không đóng kèm `--with-deps`.
+- `embed` (TEI) không có tuỳ chọn tắt kiểm tra chứng chỉ. Nếu nó không tải được model qua proxy, dùng image có sẵn model (mục 5.2).
+
+### 5.2 Đóng sẵn model embedding vào image (khi không vào được huggingface.co)
+
+Image `embed` được build từ `embed/`. Nếu `embed/model/` có sẵn model thì model đó được chép vào image, và `embed` khởi động **không cần mạng**: log ghi `embed: using the model built into the image`. Nếu thư mục trống, `embed` tải model từ Hugging Face như trước.
+
+Lấy model **trên một máy vào được Hugging Face** (hoặc máy đã chạy `embed` một lần), rồi build:
+
+```bash
+deploy/fetch-embed-model.sh            # chép từ volume embed_models nếu có, không thì tải từ Hugging Face
+deploy/fetch-embed-model.sh --from-hub # luôn tải (qua HTTPS_PROXY nếu có; APP_TLS_VERIFY=false thì curl -k)
+docker compose build embed && docker compose up -d embed
+```
+
+Model được ghim ở một revision cố định, nên vector giống hệt nhau giữa các lần build. Model không được commit vào git (~470 MB).
+
+Đưa sang máy trong mạng nội bộ bằng một trong hai cách:
+- **Gói phát hành** (mục 9): `deploy/package.sh` chép `embed/model/` vào image `embed` và lưu vào `images/embed.tar.gz`. Bên máy đích chỉ cần `docker load`.
+- **Chỉ riêng image:** `docker save rocketchat-bot-embed:latest | gzip > embed.tar.gz`, chép sang máy đích, rồi `gunzip -c embed.tar.gz | docker load` và `docker compose up -d --no-build embed`.
 
 ```bash
 docker compose up -d --build            # cách B: docker compose up -d --no-build
@@ -289,8 +308,8 @@ Không cần debug thì log vẫn ghi nguyên nhân gốc của lỗi kết nố
    Script đóng gói sẽ dừng nếu bốn chỗ không khớp nhau.
 2. Commit, rồi chạy:
    ```bash
-   deploy/package.sh               # mã nguồn + image backend và portal  (~105 MB)
-   deploy/package.sh --with-deps   # thêm image Qdrant và TEI            (~0.7 GB)
+   deploy/package.sh               # mã nguồn + image backend, portal, embed (có model nếu embed/model/ đã có, mục 5.2)
+   deploy/package.sh --with-deps   # thêm image Qdrant
    deploy/package.sh --no-images   # chỉ mã nguồn
    ```
 3. Kết quả nằm ở `release/rocketchat-bot-<version>.tar` (thư mục `release/` không được commit).

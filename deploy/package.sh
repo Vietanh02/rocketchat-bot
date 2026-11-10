@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build a release package of the bot: source, Docker images, checksums.
 #
-#   deploy/package.sh              # source + bot images (backend, portal)
-#   deploy/package.sh --with-deps  # also Qdrant and the embedding server images
+#   deploy/package.sh              # source + bot images (backend, portal, embed)
+#   deploy/package.sh --with-deps  # also the Qdrant image
 #   deploy/package.sh --no-images  # source only
 #
 # Output: release/rocketchat-bot-<version>/ and a .tar of that folder.
@@ -53,7 +53,15 @@ if [[ $with_images -eq 1 ]]; then
   build=$(mktemp -d)
   trap 'rm -rf "$build"' EXIT
   tar -xzf "$OUT/$NAME-source.tar.gz" -C "$build"
-  (cd "$build/rocketchat-bot" && BOT_VERSION="$VERSION" docker compose build backend portal)
+  # The embedding model is not in git; built in from embed/model/, the
+  # image needs no huggingface.co where it is installed.
+  if [[ -f embed/model/onnx/model.onnx ]]; then
+    cp -r embed/model/. "$build/rocketchat-bot/embed/model/"
+  else
+    echo "warning: embed/model/ is empty (deploy/fetch-embed-model.sh); the embed image" >&2
+    echo "         will download its model from Hugging Face on first start" >&2
+  fi
+  (cd "$build/rocketchat-bot" && BOT_VERSION="$VERSION" docker compose build backend portal embed)
 
   save() {  # image, file
     echo "==> Saving $1"
@@ -61,6 +69,7 @@ if [[ $with_images -eq 1 ]]; then
   }
   save "rocketchat-bot-backend:$VERSION" backend
   save "rocketchat-bot-portal:$VERSION" portal
+  save "rocketchat-bot-embed:$VERSION" embed
   if [[ $with_deps -eq 1 ]]; then
     for image in $(cd "$build/rocketchat-bot" && docker compose config --images | grep -v '^rocketchat-bot-'); do
       docker image inspect "$image" >/dev/null 2>&1 || docker pull "$image"

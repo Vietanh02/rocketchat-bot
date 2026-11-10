@@ -92,18 +92,22 @@ services:
   # Embedding model for the vector database, on this machine: no API calls,
   # nothing leaves the server. Up to 1.5 GB of RAM while loading. In the portal (Memory):
   # provider "text-embeddings-inference", URL http://embed:80, prefixes
-  # "query: " and "passage: " (e5 models are trained with them). The model is
-  # downloaded into the embed_models volume on first start.
+  # "query: " and "passage: " (e5 models are trained with them).
+  #
+  # The model is built into the image when embed/model/ holds it
+  # (deploy/fetch-embed-model.sh): no huggingface.co needed. Otherwise it is
+  # downloaded into the embed_models volume on first start, via the proxy.
   embed:
-    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8.3
+    build: ./embed
+    image: rocketchat-bot-embed:${BOT_VERSION:-latest}
     restart: unless-stopped
     # Loading the ONNX model peaks above 1 GB; it settles lower once running.
     mem_limit: 1536m
+    environment: *proxy-env
     # Two tokenizer workers and small batches keep warm-up under the limit;
     # the defaults (one worker per core, 16k-token batches) get it OOM-killed.
-    # Downloads the model from Hugging Face on first start, through the proxy.
-    environment: *proxy-env
-    command: ["--model-id", "intfloat/multilingual-e5-small", "--tokenization-workers", "2", "--max-batch-tokens", "4096", "--max-client-batch-size", "64"]
+    # The model is chosen by embed/start.sh.
+    command: ["--tokenization-workers", "2", "--max-batch-tokens", "4096", "--max-client-batch-size", "64"]
     volumes:
       - embed_models:/data
     networks:

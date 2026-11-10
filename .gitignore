@@ -25,3 +25,7 @@ release/
 # Folders copied in to import into the knowledge base
 kb_import/*
 !kb_import/README.md
+
+# The embedding model built into the embed image (deploy/fetch-embed-model.sh)
+embed/model/*
+!embed/model/README.md
