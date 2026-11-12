@@ -52,6 +52,7 @@ services:
       APP_SCRIPTS_DIR: /app/scripts
       APP_SKILLS_DIR: /app/skills
       APP_KB_IMPORT_DIR: /app/kb_import
+      APP_MCP_SERVERS_DIR: /app/mcp_servers
       APP_QDRANT_URL: ${APP_QDRANT_URL:-http://qdrant:6333}
     depends_on:
       - qdrant
@@ -65,6 +66,9 @@ services:
       # Folders to import into the knowledge base (e.g. a Confluence export),
       # copied here and imported from the Knowledge base page.
       - ./kb_import:/app/kb_import:ro
+      # MCP servers started over stdio run in this folder: a Python server kept
+      # here is set up as command `python`, arguments `<folder>/server.py`.
+      - ./mcp_servers:/app/mcp_servers:ro
     # MCP servers running on the host are reached at http://host.docker.internal:<port>.
     extra_hosts:
       - "host.docker.internal:host-gateway"

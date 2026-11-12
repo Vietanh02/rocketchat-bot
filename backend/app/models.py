@@ -1008,6 +1008,9 @@ class McpServer(Base, TimestampMixin):
     # Fernet ciphertext of a JSON object of environment variables.
     env_enc: Mapped[str | None] = mapped_column(Text)
     timeout_seconds: Mapped[float] = mapped_column(Float, default=30.0)
+    # How long an idle session (and a stdio server's process) is kept open for
+    # the next call; 0 opens a new one for every call.
+    keep_alive_seconds: Mapped[int] = mapped_column(Integer, default=300)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     # What the last refresh of its tools found wrong, if anything.
     last_error: Mapped[str | None] = mapped_column(Text)
@@ -1031,6 +1034,14 @@ class McpTool(Base):
     # JSON Schema of its arguments, as the server gave it.
     input_schema_json: Mapped[str] = mapped_column(Text, default="{}")
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Offered to everyone, the safe profile too, whatever the policy's globs say.
+    # Otherwise the policy decides (out of the box: trusted people only).
+    everyone: Mapped[bool] = mapped_column(Boolean, default=False)
+    # What the server says of it (MCP tool annotations), kept at each refresh.
+    read_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    destructive: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Answers reused for the same arguments for this long; 0 never.
+    cache_seconds: Mapped[int] = mapped_column(Integer, default=0)
 
     server: Mapped[McpServer] = relationship(back_populates="tools")
 

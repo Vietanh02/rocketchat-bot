@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rocketchat-bot"
-version = "0.6.1"
+version = "0.6.2"
 description = "Rocket.Chat chatbot with a configuration portal"
 requires-python = ">=3.12"
 dependencies = [

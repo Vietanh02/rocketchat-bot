@@ -29,7 +29,16 @@ from app.security import decrypt_secret, encrypt_secret
 
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 
-PLAIN_FIELDS = ("name", "description", "transport", "url", "command", "timeout_seconds", "enabled")
+PLAIN_FIELDS = (
+    "name",
+    "description",
+    "transport",
+    "url",
+    "command",
+    "timeout_seconds",
+    "keep_alive_seconds",
+    "enabled",
+)
 
 
 def _names(ciphertext: str | None) -> list[str]:
@@ -51,7 +60,9 @@ def _out(server: McpServer) -> McpServerOut:
         command=server.command or "",
         args=[str(a) for a in json.loads(server.args_json or "[]")],
         timeout_seconds=server.timeout_seconds,
+        keep_alive_seconds=server.keep_alive_seconds or 0,
         enabled=server.enabled,
+        connected=server.id in mcp.pool.open_servers(),
         header_names=_names(server.headers_enc),
         env_names=_names(server.env_enc),
         last_error=server.last_error,
@@ -64,6 +75,10 @@ def _out(server: McpServer) -> McpServerOut:
                 description=tool.description or "",
                 input_schema=json.loads(tool.input_schema_json or "{}"),
                 enabled=tool.enabled,
+                everyone=tool.everyone,
+                read_only=tool.read_only,
+                destructive=tool.destructive,
+                cache_seconds=tool.cache_seconds or 0,
             )
             for tool in server.tools
         ],
@@ -142,6 +157,7 @@ async def update_server(
     _check(server)
     record_audit(session, admin, "update", "mcp_server", server.id, ", ".join(sorted(changes)) or "(no changes)")
     await _changed(session, runtime)
+    mcp.pool.forget(server_id)
     return _out(await _load(session, server_id))
 
 
@@ -151,13 +167,15 @@ async def delete_server(server_id: int, admin: AdminUser, session: SessionDep, r
     record_audit(session, admin, "delete", "mcp_server", server.id, server.name)
     await session.delete(server)
     await _changed(session, runtime)
+    mcp.pool.forget(server_id)
 
 
 @router.post("/{server_id}/refresh", response_model=McpServerOut)
 async def refresh_tools(
     server_id: int, admin: AdminUser, session: SessionDep, runtime: RuntimeDep
 ) -> McpServerOut:
-    """Ask the server for its tools; new ones start off, removed ones go."""
+    """Ask the server for its tools; new ones start off, removed ones go.
+    What the server says of each (read-only, destructive) is kept."""
     server = await _load(session, server_id)
     try:
         listed = await mcp.list_tools(McpServerSpec.from_model(server))
@@ -173,6 +191,8 @@ async def refresh_tools(
             tool = McpTool(name=item.name, enabled=False)
         tool.description = item.description
         tool.input_schema_json = json.dumps(item.input_schema)
+        tool.read_only = item.read_only
+        tool.destructive = item.destructive
         keep.append(tool)
     server.tools = keep
     server.last_error = None
@@ -194,8 +214,11 @@ async def set_tool(
     tool = await session.get(McpTool, tool_id)
     if tool is None or tool.server_id != server_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such tool")
-    tool.enabled = payload.enabled
-    record_audit(session, admin, "update", "mcp_tool", tool.id, f"{tool.name}: {'on' if payload.enabled else 'off'}")
+    changes = payload.model_dump(exclude_unset=True, exclude_none=True)
+    for field, value in changes.items():
+        setattr(tool, field, value)
+    summary = ", ".join(f"{field}={value}" for field, value in sorted(changes.items())) or "(no changes)"
+    record_audit(session, admin, "update", "mcp_tool", tool.id, f"{tool.name}: {summary}")
     await _changed(session, runtime)
     return _out(await _load(session, server_id))
 
@@ -211,7 +234,9 @@ async def call_tool(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such tool")
     started = time.monotonic()
     try:
-        ok, text = await mcp.call_tool(McpServerSpec.from_model(server), tool.name, payload.arguments)
+        ok, text = await mcp.call_tool(
+            McpServerSpec.from_model(server), tool.name, payload.arguments, read_only=tool.read_only
+        )
     except McpError as exc:
         ok, text = False, str(exc)
     return McpCallOut(ok=ok, text=text, duration_ms=int((time.monotonic() - started) * 1000))

@@ -309,7 +309,7 @@ class AgentRunner:
                 )
             )
         if snapshot.mcp_tools:
-            providers.append(McpTools(snapshot.mcp_tools))
+            providers.append(McpTools(snapshot.mcp_tools, cache=self.tool_results))
         skills = await self._skills()
         if skills:
             providers.append(SkillTools(skills, turn.message.template_vars()))

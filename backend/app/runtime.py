@@ -39,6 +39,10 @@ class Runtime:
     async def stop(self) -> None:
         await self.bot.stop()
         await self.scheduler.shutdown()
+        # Sessions kept open to MCP servers, and stdio servers' processes.
+        from app.integrations import mcp
+
+        await mcp.pool.close_all()
 
     async def apply_config_change(self, *, reconnect: bool = False) -> None:
         """Called after a portal write so running components pick it up."""

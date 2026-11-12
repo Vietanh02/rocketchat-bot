@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api/client";
-import type { McpCallResult, McpServer, McpServerDraft, McpTool } from "../api/types";
+import type { McpCallResult, McpServer, McpServerDraft, McpTool, McpToolChanges } from "../api/types";
 import { useAuth } from "../auth";
 import { Banner, Card, Checkbox, Empty, Field, Loading, Pill } from "../components/ui";
 import { formatRelative } from "../format";
@@ -24,6 +24,7 @@ const EMPTY: Form = {
   command: "",
   args: "",
   timeout_seconds: 30,
+  keep_alive_seconds: 300,
   enabled: true,
   headers: "",
   env: "",
@@ -106,7 +107,19 @@ export default function McpPage() {
   const edit = (server: McpServer) =>
     setEditing({
       id: server.id,
-      form: { ...server, args: server.args.join("\n"), headers: "", env: "" },
+      form: {
+        name: server.name,
+        description: server.description,
+        transport: server.transport,
+        url: server.url,
+        command: server.command,
+        args: server.args.join("\n"),
+        timeout_seconds: server.timeout_seconds,
+        keep_alive_seconds: server.keep_alive_seconds,
+        enabled: server.enabled,
+        headers: "",
+        env: "",
+      },
     });
 
   const list = servers.data ?? [];
@@ -118,9 +131,10 @@ export default function McpPage() {
           <h1>MCP servers</h1>
           <p>
             Tools of MCP servers the language model may call. A server's tools start off: turn on only
-            those you are happy for anyone it is offered to (see{" "}
+            those you are happy for anyone it is offered to to call with arguments of their choosing.
+            Who gets a tool that is on is up to the policy (see{" "}
             <Link to="/access">Access → Tools by profile</Link>, where MCP tools are for trusted people
-            by default) to call with arguments of their choosing.
+            by default), unless you open it to everyone here.
           </p>
         </div>
         {isAdmin && (
@@ -168,7 +182,8 @@ export default function McpPage() {
             key={server.id}
             title={
               <h2>
-                {server.name} <Pill kind={server.enabled ? "ok" : undefined}>{server.enabled ? "on" : "off"}</Pill>
+                {server.name} <Pill kind={server.enabled ? "ok" : undefined}>{server.enabled ? "on" : "off"}</Pill>{" "}
+                {server.connected && <Pill>session open</Pill>}
               </h2>
             }
             action={
@@ -193,6 +208,9 @@ export default function McpPage() {
                 {server.header_names.length > 0 && ` · headers: ${server.header_names.join(", ")}`}
                 {server.env_names.length > 0 && ` · env: ${server.env_names.join(", ")}`}
                 {server.tools_refreshed_at && ` · tools listed ${formatRelative(server.tools_refreshed_at)}`}
+                {server.keep_alive_seconds > 0
+                  ? ` · session kept ${server.keep_alive_seconds}s idle`
+                  : " · a new session per call"}
               </div>
               {server.description && <p style={{ margin: 0 }}>{server.description}</p>}
               {server.last_error && <Banner kind="error">{server.last_error}</Banner>}
@@ -242,6 +260,18 @@ function ServerForm({
             onChange={(e) => set("timeout_seconds", Number(e.target.value))}
           />
         </Field>
+        <Field
+          label="Keep alive (seconds)"
+          hint="An idle session (a stdio server's process) is kept this long for the next call. 0: a new one per call."
+        >
+          <input
+            type="number"
+            min={0}
+            max={86400}
+            value={form.keep_alive_seconds}
+            onChange={(e) => set("keep_alive_seconds", Number(e.target.value))}
+          />
+        </Field>
       </div>
       <Field label="Description" hint="For you; the model sees each tool's own description.">
         <input type="text" value={form.description} onChange={(e) => set("description", e.target.value)} />
@@ -262,11 +292,16 @@ function ServerForm({
         <>
           <Field
             label="Command"
-            hint="Run in the backend container, which has Python only: a Node server needs node/npx added to the image."
+            hint="Run in the backend container, in the mcp_servers folder. python is the bot's own Python, with the mcp SDK. The image has no node/npx."
           >
-            <input type="text" value={form.command} onChange={(e) => set("command", e.target.value)} />
+            <input
+              type="text"
+              value={form.command}
+              placeholder="python"
+              onChange={(e) => set("command", e.target.value)}
+            />
           </Field>
-          <Field label="Arguments" hint="One per line.">
+          <Field label="Arguments" hint="One per line, e.g. _example/server.py for mcp_servers/_example/server.py.">
             <textarea rows={3} value={form.args} onChange={(e) => set("args", e.target.value)} spellCheck={false} />
           </Field>
           <Field label="Environment (JSON)" hint={`Stored encrypted. ${keep(existing?.env_names)}`}>
@@ -294,8 +329,16 @@ function Tools({
   const [args, setArgs] = useState("{}");
   const [result, setResult] = useState<McpCallResult | null>(null);
 
-  const toggle = (tool: McpTool) =>
-    void api.setMcpTool(server.id, tool.id, !tool.enabled).then(onChanged).catch(onError);
+  const change = (tool: McpTool, changes: McpToolChanges) =>
+    void api.setMcpTool(server.id, tool.id, changes).then(onChanged).catch(onError);
+
+  const openToEveryone = (tool: McpTool, everyone: boolean) => {
+    if (everyone && !tool.read_only) {
+      const what = tool.destructive ? "says it may destroy data" : "does not say it is read-only";
+      if (!window.confirm(`${server.name} ${what} for ${tool.name}. Offer it to everyone anyway?`)) return;
+    }
+    change(tool, { everyone });
+  };
 
   async function run(event: React.FormEvent) {
     event.preventDefault();
@@ -318,6 +361,8 @@ function Tools({
               <th>Tool</th>
               <th>Description</th>
               <th>Offered</th>
+              <th title="The policy decides, or everyone gets it">To</th>
+              <th title="Answers reused for the same arguments, in seconds">Reuse (s)</th>
               {isAdmin && <th />}
             </tr>
           </thead>
@@ -325,7 +370,9 @@ function Tools({
             {server.tools.map((tool) => (
               <tr key={tool.id}>
                 <td>
-                  <code>{tool.name}</code>
+                  <code>{tool.name}</code>{" "}
+                  {tool.read_only && <Pill kind="ok">read-only</Pill>}
+                  {tool.destructive && <Pill kind="warn">destructive</Pill>}
                   <div className="hint">{tool.tool_name}</div>
                 </td>
                 <td className="muted">{tool.description || "—"}</td>
@@ -334,7 +381,33 @@ function Tools({
                     label={tool.enabled ? "on" : "off"}
                     checked={tool.enabled}
                     disabled={!isAdmin}
-                    onChange={() => toggle(tool)}
+                    onChange={() => change(tool, { enabled: !tool.enabled })}
+                  />
+                </td>
+                <td>
+                  <select
+                    value={tool.everyone ? "everyone" : "policy"}
+                    disabled={!isAdmin}
+                    onChange={(e) => openToEveryone(tool, e.target.value === "everyone")}
+                  >
+                    <option value="policy">Policy</option>
+                    <option value="everyone">Everyone</option>
+                  </select>
+                </td>
+                <td>
+                  <input
+                    type="number"
+                    min={0}
+                    max={86400}
+                    style={{ width: "6em" }}
+                    defaultValue={tool.cache_seconds}
+                    key={`${tool.id}-${tool.cache_seconds}`}
+                    disabled={!isAdmin}
+                    title={tool.read_only ? "" : "Only for a tool whose answer does not depend on when it is called"}
+                    onBlur={(e) => {
+                      const value = Math.max(0, Math.round(Number(e.target.value) || 0));
+                      if (value !== tool.cache_seconds) change(tool, { cache_seconds: value });
+                    }}
                   />
                 </td>
                 {isAdmin && (

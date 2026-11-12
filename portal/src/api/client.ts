@@ -49,6 +49,7 @@ import type {
   McpCallResult,
   McpServer,
   McpServerDraft,
+  McpToolChanges,
   PolicyTool,
   Skill,
   SkillDetail,
@@ -259,8 +260,8 @@ export const api = {
   updateMcpServer: (id: number, changes: Partial<McpServerDraft>) => put<McpServer>(`/api/mcp/${id}`, changes),
   deleteMcpServer: (id: number) => del(`/api/mcp/${id}`),
   refreshMcpServer: (id: number) => post<McpServer>(`/api/mcp/${id}/refresh`),
-  setMcpTool: (serverId: number, toolId: number, enabled: boolean) =>
-    put<McpServer>(`/api/mcp/${serverId}/tools/${toolId}`, { enabled }),
+  setMcpTool: (serverId: number, toolId: number, changes: McpToolChanges) =>
+    put<McpServer>(`/api/mcp/${serverId}/tools/${toolId}`, changes),
   callMcpTool: (serverId: number, toolId: number, args: Record<string, unknown>) =>
     post<McpCallResult>(`/api/mcp/${serverId}/tools/${toolId}/call`, { arguments: args }),
 

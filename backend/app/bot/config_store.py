@@ -23,6 +23,7 @@ from app.config import Settings, get_settings
 from app.integrations.executor import IntegrationSpec
 from app.agent.policy import ToolPolicySettings
 from app.integrations.mcp import McpServerSpec, McpToolSpec
+from app.agent.tools.mcp import mcp_tool_name
 from app.models import (
     AgentConfig,
     BotAccessEntry,
@@ -481,8 +482,19 @@ class ConfigStore:
                 ).all()
                 servers = {server.id: McpServerSpec.from_model(server) for _, server in mcp_rows}
                 mcp_tools = tuple(
-                    McpToolSpec(servers[server.id], tool.name, tool.description, tool.input_schema_json)
+                    McpToolSpec(
+                        servers[server.id],
+                        tool.name,
+                        tool.description,
+                        tool.input_schema_json,
+                        everyone=tool.everyone,
+                        read_only=tool.read_only,
+                        cache_seconds=tool.cache_seconds or 0,
+                    )
                     for tool, server in mcp_rows
+                )
+                open_tools = frozenset(
+                    mcp_tool_name(spec.server.name, spec.name) for spec in mcp_tools if spec.everyone
                 )
 
                 commands = list(
@@ -516,7 +528,7 @@ class ConfigStore:
                 embedding=EmbeddingSettings.from_model(embedding_config),
                 memory=MemorySettings.from_model(memory_config),
                 knowledge=KnowledgeSettings.from_model(knowledge_config),
-                policy=ToolPolicySettings.from_model(policy_config),
+                policy=ToolPolicySettings.from_model(policy_config, open_tools=open_tools),
                 mcp_tools=mcp_tools,
             )
             self._snapshot = snapshot

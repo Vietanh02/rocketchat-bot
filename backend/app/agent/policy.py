@@ -8,7 +8,8 @@ Two profiles (`app.models.ToolPolicy`):
 A tool is offered when its name matches one of the profile's allow globs
 and none of its deny globs. Out of the box, safe users get every tool
 except MCP tools (`mcp__*`) and running skill scripts (`skill_run`); trusted
-users get them all. In a channel the profile is the sender's, so a trusted
+users get them all. An MCP tool an admin opened to everyone (`open_tools`)
+is offered to both profiles whatever the globs say. In a channel the profile is the sender's, so a trusted
 person's tools are never offered to someone else's message; a job uses the
 profile of the person who started it.
 """
@@ -42,10 +43,13 @@ class ToolPolicySettings:
     safe_deny: tuple[str, ...] = ("mcp__*", "skill_run")
     trusted_allow: tuple[str, ...] = ("*",)
     trusted_deny: tuple[str, ...] = ()
+    # Tool names offered to everyone regardless of the globs.
+    open_tools: frozenset[str] = frozenset()
 
     @classmethod
-    def from_model(cls, model) -> ToolPolicySettings:
+    def from_model(cls, model, *, open_tools: frozenset[str] = frozenset()) -> ToolPolicySettings:
         return cls(
+            open_tools=open_tools,
             trusted=usernames(model.trusted_usernames or ""),
             safe_allow=globs(model.safe_allow or ""),
             safe_deny=globs(model.safe_deny or ""),
@@ -57,6 +61,8 @@ class ToolPolicySettings:
         return TRUSTED if username and username.lstrip("@").casefold() in self.trusted else SAFE
 
     def permits(self, profile: str, tool: str) -> bool:
+        if tool in self.open_tools:
+            return True
         allow, deny = (
             (self.trusted_allow, self.trusted_deny)
             if profile == TRUSTED

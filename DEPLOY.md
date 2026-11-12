@@ -205,7 +205,7 @@ Mở `http://<máy>:8081` và đăng nhập bằng tài khoản bootstrap. Nên 
 | Assistant | Fast model (để trống thì dùng model chính); hạn chót một lượt trả lời; cài đặt Jobs (sau 45s thì chuyển thành job). |
 | Access | Ai được dùng bot (mọi người, allowlist hoặc blocklist). **Tools by profile:** danh sách người *trusted* và glob tool cho từng profile. |
 | Cache | FAQ ghim; ngưỡng tương đồng; thời hạn của câu trả lời đã lưu. |
-| MCP servers | Thêm server → **Refresh tools** → bật từng tool. Tool mới mặc định tắt. |
+| MCP servers | Thêm server → **Refresh tools** → bật từng tool. Tool mới mặc định tắt. Cột **To**: `Policy` (mặc định, chỉ người trusted) hoặc `Everyone`. Cột **Reuse (s)**: dùng lại kết quả cho cùng đối số. |
 | Skills | Liệt kê các skill trong thư mục `skills/` và bật/tắt từng cái (xem mục 8.3). |
 
 ## 7. Kiểm tra sau khi triển khai
@@ -230,6 +230,11 @@ Trên portal, trang **Logs** liệt kê từng tin nhắn, còn trang **Assistan
 ### 8.2 MCP server trên máy host
 Dùng URL `http://host.docker.internal:<port>/mcp` và đặt `APP_ALLOW_PRIVATE_INTEGRATION_HOSTS=true`.
 Image backend chỉ có Python. MCP server kiểu stdio viết bằng Node (`npx …`) cần cài thêm Node vào `backend/Dockerfile`.
+
+### 8.2b MCP server viết bằng Python (stdio)
+Chép server vào `mcp_servers/<tên>/server.py` (xem mẫu `mcp_servers/_example` và `mcp_servers/README.md`). Thư mục được mount chỉ đọc vào `/app/mcp_servers`. Trên trang MCP: transport **stdio**, command `python`, arguments `<tên>/server.py`.
+- `python` là chính Python của bot, nên server import được `mcp`, `httpx`… Thư viện khác phải thêm vào `backend/requirements.txt` rồi build lại backend.
+- Process được giữ sống giữa các lần gọi (**Keep alive**, mặc định 300 giây rảnh). Sửa code server thì bấm **Save** server trên portal để process khởi động lại.
 
 ### 8.3 Thêm skill
 Chép thư mục skill vào `skills/<tên>/` (xem mẫu `skills/_example`), rồi bấm **Look again** trên trang Skills.

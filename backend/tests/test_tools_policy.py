@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from mcp import Client
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 
 from app.agent.policy import SAFE, TRUSTED, ToolPolicySettings, globs
 from app.bot.config_store import ensure_tool_policy
@@ -76,7 +77,7 @@ async def test_the_portal_shows_who_gets_which_tool(admin_client):
 # --------------------------------------------------------------------------- #
 
 
-def demo_server() -> MCPServer:
+def demo_server(looked_up: list[str] | None = None) -> MCPServer:
     server = MCPServer("demo")
 
     @server.tool()
@@ -84,26 +85,76 @@ def demo_server() -> MCPServer:
         """Add two numbers."""
         return a + b
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(destructive_hint=True))
     def boom() -> str:
         """Always fails."""
         raise ValueError("nope")
 
+    @server.tool(annotations=ToolAnnotations(read_only_hint=True))
+    def lookup(key: str) -> str:
+        """Look a key up."""
+        if looked_up is not None:
+            looked_up.append(key)
+        return key.upper()
+
     return server
+
+
+class Sessions:
+    """Sessions opened to the demo server. `restart()` breaks the open ones,
+    as when the server process is restarted."""
+
+    def __init__(self) -> None:
+        self.opened: list[str] = []
+        self.looked_up: list[str] = []
+        self.generation = 0
+
+    def restart(self) -> None:
+        self.generation += 1
+
+
+class DemoClient:
+    def __init__(self, server: MCPServer, sessions: Sessions) -> None:
+        self._inner = Client(server, cache=None)
+        self._sessions = sessions
+        self._generation = sessions.generation
+
+    async def __aenter__(self):
+        await self._inner.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc):
+        return await self._inner.__aexit__(*exc)
+
+    def _check(self) -> None:
+        if self._generation != self._sessions.generation:
+            raise ConnectionError("session terminated")
+
+    async def list_tools(self, cursor=None):
+        return await self._inner.list_tools(cursor=cursor)
+
+    async def send_ping(self):
+        self._check()
+        return await self._inner.send_ping()
+
+    async def call_tool(self, name, arguments):
+        self._check()
+        return await self._inner.call_tool(name, arguments)
 
 
 @pytest.fixture
 def mcp_demo(monkeypatch):
-    """Every MCP server is the in-process demo server; records who was asked."""
-    asked: list[str] = []
-    server = demo_server()
+    """Every MCP server is the in-process demo server; records each session opened."""
+    sessions = Sessions()
+    server = demo_server(sessions.looked_up)
 
     def factory(spec):
-        asked.append(spec.name)
-        return Client(server, cache=None)
+        sessions.opened.append(spec.name)
+        return DemoClient(server, sessions)
 
     monkeypatch.setattr(mcp_client, "client_factory", factory)
-    return asked
+    monkeypatch.setattr(mcp_client, "pool", mcp_client.McpPool())
+    return sessions
 
 
 async def add_server(admin_client, **fields) -> dict:
@@ -119,7 +170,10 @@ async def test_an_mcp_servers_tools_are_listed_off_and_turned_on_one_by_one(admi
     assert server["header_names"] == ["Authorization"] and "s3cret" not in json.dumps(server)
     refreshed = (await admin_client.post(f"/api/mcp/{server['id']}/refresh")).json()
     tools = {t["name"]: t for t in refreshed["tools"]}
-    assert set(tools) == {"add", "boom"} and not any(t["enabled"] for t in tools.values())
+    assert set(tools) == {"add", "boom", "lookup"} and not any(t["enabled"] for t in tools.values())
+    # What the server says of each tool is kept.
+    assert tools["lookup"]["read_only"] and not tools["lookup"]["destructive"]
+    assert tools["boom"]["destructive"] and not tools["add"]["read_only"]
     assert tools["add"]["tool_name"] == "mcp__demo__add"
     assert tools["add"]["input_schema"]["required"] == ["a", "b"]
 
@@ -171,6 +225,130 @@ async def test_mcp_servers_need_what_their_transport_needs(admin_client):
     assert response.status_code == 422
     response = await admin_client.post("/api/mcp", json={"name": "bad name", "url": "http://a/b"})
     assert response.status_code == 422
+
+
+async def tool_ids(admin_client, server: dict) -> dict[str, int]:
+    refreshed = (await admin_client.post(f"/api/mcp/{server['id']}/refresh")).json()
+    return {t["name"]: t["id"] for t in refreshed["tools"]}
+
+
+async def try_tool(admin_client, server: dict, tool_id: int, **arguments) -> dict:
+    response = await admin_client.post(
+        f"/api/mcp/{server['id']}/tools/{tool_id}/call", json={"arguments": arguments}
+    )
+    return response.json()
+
+
+async def test_a_servers_session_is_kept_open_between_calls(admin_client, mcp_demo):
+    server = await add_server(admin_client)
+    ids = await tool_ids(admin_client, server)
+    assert mcp_demo.opened == ["demo"]  # the refresh, on a session of its own
+
+    for a in range(3):
+        assert (await try_tool(admin_client, server, ids["add"], a=a, b=1))["text"] == str(a + 1)
+    assert len(mcp_demo.opened) == 2  # one more, kept for all three calls
+    assert (await admin_client.get("/api/mcp")).json()[0]["connected"] is True
+
+    # New settings close it; the next call opens another.
+    await admin_client.put(f"/api/mcp/{server['id']}", json={"timeout_seconds": 20})
+    await try_tool(admin_client, server, ids["add"], a=1, b=1)
+    assert len(mcp_demo.opened) == 3
+
+    # Kept for 0 seconds: a session per call.
+    await admin_client.put(f"/api/mcp/{server['id']}", json={"keep_alive_seconds": 0})
+    await try_tool(admin_client, server, ids["add"], a=1, b=1)
+    await try_tool(admin_client, server, ids["add"], a=1, b=1)
+    assert len(mcp_demo.opened) == 5
+    await mcp_client.pool.close_all()
+
+
+async def test_a_broken_session_is_replaced_and_only_read_only_tools_are_retried(admin_client, mcp_demo):
+    server = await add_server(admin_client)
+    ids = await tool_ids(admin_client, server)
+    assert (await try_tool(admin_client, server, ids["lookup"], key="a"))["text"] == "A"
+    opened = len(mcp_demo.opened)
+
+    # The server restarted: a read-only tool is called again on a new session.
+    mcp_demo.restart()
+    assert (await try_tool(admin_client, server, ids["lookup"], key="b"))["text"] == "B"
+    assert len(mcp_demo.opened) == opened + 1
+
+    # Any other tool is not: the call may have done its work. The next one works.
+    mcp_demo.restart()
+    failed = await try_tool(admin_client, server, ids["add"], a=1, b=2)
+    assert failed["ok"] is False and "session terminated" in failed["text"]
+    assert (await try_tool(admin_client, server, ids["add"], a=1, b=2))["text"] == "3"
+    await mcp_client.pool.close_all()
+
+
+async def test_an_mcp_tool_opened_to_everyone_reuses_its_answers(admin_client, app_env, gateway, model, mcp_demo):
+    server = await add_server(admin_client)
+    ids = await tool_ids(admin_client, server)
+    url = f"/api/mcp/{server['id']}/tools/{ids['lookup']}"
+    body = (await admin_client.put(url, json={"enabled": True, "everyone": True, "cache_seconds": 60})).json()
+    lookup = next(t for t in body["tools"] if t["name"] == "lookup")
+    assert lookup["enabled"] and lookup["everyone"] and lookup["cache_seconds"] == 60
+    await admin_client.put(f"/api/mcp/{server['id']}/tools/{ids['add']}", json={"enabled": True})
+
+    # Someone on the safe profile gets it, though `mcp__*` is denied to them...
+    safe = {"sender_username": "an", "sender_id": "U2"}
+    model.answers = [tool_use("mcp__demo__lookup", key="x"), "X.", tool_use("mcp__demo__lookup", key="x"), "X again."]
+    assert (await app_env.bot.responder.respond(context("look x up", **safe))).text == "X."
+    assert "mcp__demo__lookup" in offered(model) and "mcp__demo__add" not in offered(model)
+    # ...and the second time the answer is reused.
+    await app_env.bot.responder.respond(context("again", message_id="M2", **safe))
+    assert mcp_demo.looked_up == ["x"]
+    assert json.loads(model.requests[3]["messages"][-1]["content"]) == {"result": "X"}
+
+    tools = {t["name"]: t for t in (await admin_client.get("/api/policy/tools")).json()}
+    assert tools["mcp__demo__lookup"]["safe"] is True and tools["mcp__demo__add"]["safe"] is False
+    await mcp_client.pool.close_all()
+
+
+PID_SERVER = """
+import os
+from mcp.server.mcpserver import MCPServer
+
+server = MCPServer("pid")
+
+
+@server.tool()
+def pid() -> int:
+    \"\"\"The process id of this server.\"\"\"
+    return os.getpid()
+
+
+if __name__ == "__main__":
+    server.run("stdio")
+"""
+
+
+async def test_a_python_server_over_stdio_keeps_its_process(tmp_path, monkeypatch):
+    monkeypatch.setattr(get_settings(), "mcp_servers_dir", str(tmp_path))
+    monkeypatch.setattr(mcp_client, "pool", mcp_client.McpPool())
+    (tmp_path / "pid").mkdir()
+    (tmp_path / "pid" / "server.py").write_text(PID_SERVER, encoding="utf-8")
+    # `python` is the bot's interpreter, run in the servers folder.
+    spec = mcp_client.McpServerSpec(
+        1, "pid", "stdio", command="python", args=("pid/server.py",), timeout_seconds=30, keep_alive_seconds=60
+    )
+    assert [t.name for t in await mcp_client.list_tools(spec)] == ["pid"]
+    first = await mcp_client.call_tool(spec, "pid", {})
+    assert first[0] and first == await mcp_client.call_tool(spec, "pid", {})
+
+    mcp_client.pool.forget(1)
+    third = await mcp_client.call_tool(spec, "pid", {})
+    assert third[0] and third != first
+    await mcp_client.pool.close_all()
+    assert len(mcp_client.pool) == 0
+
+
+async def test_the_example_python_server_offers_read_only_tools():
+    spec = mcp_client.McpServerSpec(1, "example", "stdio", command="python", args=("_example/server.py",))
+    tools = {t.name: t for t in await mcp_client.list_tools(spec)}
+    assert set(tools) == {"current_time", "count_words"} and all(t.read_only for t in tools.values())
+    ok, text = await mcp_client.call_tool(spec, "current_time", {"utc_offset_hours": 99})
+    assert not ok and "between -14 and 14" in text
 
 
 # --------------------------------------------------------------------------- #

@@ -1019,6 +1019,12 @@ class McpToolOut(BaseModel):
     description: str
     input_schema: dict[str, Any]
     enabled: bool
+    # Offered to everyone, whatever the policy says.
+    everyone: bool = False
+    # What the server says of it.
+    read_only: bool = False
+    destructive: bool = False
+    cache_seconds: int = 0
 
 
 class McpServerOut(BaseModel):
@@ -1030,7 +1036,10 @@ class McpServerOut(BaseModel):
     command: str
     args: list[str]
     timeout_seconds: float
+    keep_alive_seconds: int
     enabled: bool
+    # A session is open to it now.
+    connected: bool = False
     # Header and environment names only; their values never leave the server.
     header_names: list[str]
     env_names: list[str]
@@ -1047,6 +1056,8 @@ class McpServerIn(BaseModel):
     command: str = Field(default="", max_length=512)
     args: list[str] = Field(default_factory=list, max_length=50)
     timeout_seconds: float = Field(default=30.0, ge=1, le=300)
+    # 0 opens a new session for every call.
+    keep_alive_seconds: int = Field(default=300, ge=0, le=86_400)
     enabled: bool = True
     # Write-only. JSON objects; omit to keep, {} to clear.
     headers: dict[str, str] | None = None
@@ -1069,6 +1080,7 @@ class McpServerUpdate(BaseModel):
     command: str | None = Field(default=None, max_length=512)
     args: list[str] | None = Field(default=None, max_length=50)
     timeout_seconds: float | None = Field(default=None, ge=1, le=300)
+    keep_alive_seconds: int | None = Field(default=None, ge=0, le=86_400)
     enabled: bool | None = None
     headers: dict[str, str] | None = None
     env: dict[str, str] | None = None
@@ -1085,7 +1097,11 @@ class McpServerUpdate(BaseModel):
 
 
 class McpToolUpdate(BaseModel):
-    enabled: bool
+    """Leave a field out to keep it."""
+
+    enabled: bool | None = None
+    everyone: bool | None = None
+    cache_seconds: int | None = Field(default=None, ge=0, le=86_400)
 
 
 class McpCallIn(BaseModel):

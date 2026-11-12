@@ -627,7 +627,16 @@ export interface McpTool {
   description: string;
   input_schema: Record<string, unknown>;
   enabled: boolean;
+  /** Offered to everyone, whatever the policy says. */
+  everyone: boolean;
+  /** What the server says of it. */
+  read_only: boolean;
+  destructive: boolean;
+  /** Answers reused for the same arguments for this long; 0 never. */
+  cache_seconds: number;
 }
+
+export type McpToolChanges = Partial<Pick<McpTool, "enabled" | "everyone" | "cache_seconds">>;
 
 export interface McpServer {
   id: number;
@@ -638,7 +647,10 @@ export interface McpServer {
   command: string;
   args: string[];
   timeout_seconds: number;
+  keep_alive_seconds: number;
   enabled: boolean;
+  /** A session is open to it now. */
+  connected: boolean;
   header_names: string[];
   env_names: string[];
   last_error: string | null;
@@ -654,6 +666,8 @@ export interface McpServerDraft {
   command: string;
   args: string[];
   timeout_seconds: number;
+  /** 0 opens a new session for every call. */
+  keep_alive_seconds: number;
   enabled: boolean;
   /** Write-only; omit to keep the stored ones, {} to clear them. */
   headers?: Record<string, string>;

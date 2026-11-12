@@ -456,15 +456,24 @@ The code lives in `app/agent/jobs.py` and `app/api/jobs.py`.
 **Who gets which tool** (Access → *Tools by profile*): people listed as trusted get the
 *trusted* profile, everyone else *safe*. A tool is offered when its name matches an allow glob
 and no deny glob. By default safe people get every tool except MCP tools (`mcp__*`) and
-running skill scripts (`skill_run`); trusted people get them all. In a channel the profile is the
-sender's; a job uses the profile of the person who started it.
+running skill scripts (`skill_run`); trusted people get them all. An MCP tool an admin opened to
+*everyone* on the MCP servers page is offered to both profiles whatever the globs say. In a
+channel the profile is the sender's; a job uses the profile of the person who started it.
 
 **MCP servers** (MCP servers page): the bot is an MCP client (`mcp` SDK). A server is either a
 Streamable HTTP URL with headers (stored encrypted; the private-network guard applies, and a
 server on the host is `http://host.docker.internal:<port>/mcp`) or a command run in the backend
-container over stdio (the image has Python only; a Node server needs `node`/`npx` added). *Refresh
-tools* lists its tools, which start **off**; turn on the ones the model may call. They are offered
-as `mcp__<server>__<tool>`. Each call opens a new session and is bounded by the server's timeout.
+container over stdio. A stdio server runs in `mcp_servers/` (mounted read-only at
+`/app/mcp_servers`), and `python` is the bot's own interpreter, so a Python server kept there is
+set up as command `python`, arguments `<folder>/server.py` and can import the `mcp` SDK; see
+`mcp_servers/README.md` and `mcp_servers/_example`. The image has no `node`/`npx`. *Refresh tools*
+lists its tools, which start **off**, with what the server says of each (read-only,
+destructive); turn on the ones the model may call. They are offered as `mcp__<server>__<tool>`.
+Per tool, an admin can also open it to everyone and have its answers reused for the same
+arguments (*Reuse*, seconds). A server's session (a stdio server's process) is kept open for the
+next call until it has been idle *Keep alive* seconds (300; 0 opens one per call); a session idle
+for 30 s is pinged first, and one that fails is replaced, with a read-only tool's call retried on
+the new one. Each call is bounded by the server's timeout.
 
 **Skills** (Skills page): folders in `skills/` (mounted read-only at `/app/skills`), each with a
 `SKILL.md` whose front matter gives `name`, `description` and optional `requires.bins` /

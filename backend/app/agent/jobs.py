@@ -554,7 +554,7 @@ class JobService:
                     )
                 )
         if snapshot.mcp_tools:
-            providers.append(McpTools(snapshot.mcp_tools))
+            providers.append(McpTools(snapshot.mcp_tools, cache=self.agent.tool_results))
         skills = await self.agent._skills()
         if skills:
             providers.append(SkillTools(skills, message.template_vars()))
