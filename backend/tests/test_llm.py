@@ -13,7 +13,8 @@ import httpx
 import pytest
 
 from app.bot.config_store import LLMSettings
-from app.bot.llm import MAX_TOOL_ROUNDS, LLMChat, LLMService, ToolCall, Toolbox
+from app.bot.llm import LLMChat, LLMService, ToolCall, Toolbox
+from app.config import get_settings
 from app.bot.streaming import STREAM_CURSOR
 from app.integrations import executor
 from app.models import BotConfig, Integration, IntegrationParam, LLMConfig
@@ -652,13 +653,29 @@ async def test_a_missing_argument_is_reported_to_the_model(app_env, gateway, mod
     assert "city" in json.loads(model.last_messages[-1]["content"])["error"]
 
 
-async def test_a_model_that_never_stops_calling_tools_is_cut_off(app_env, gateway, model, weather_api):
-    model.answers = [tool_use("weather_now", city="Hanoi")] * (MAX_TOOL_ROUNDS + 1)
+async def test_after_its_tool_rounds_the_model_answers_without_tools(
+    app_env, gateway, model, weather_api, monkeypatch
+):
+    monkeypatch.setattr(get_settings(), "max_tool_rounds", 3)  # APP_MAX_TOOL_ROUNDS
+    model.answers = [tool_use("weather_now", city="Hanoi")] * 3 + ["Hanoi is sunny, as far as I got."]
+
+    reply = await app_env.bot.responder.respond(context("weather?"))
+
+    assert reply.text == "Hanoi is sunny, as far as I got." and not reply.error
+    assert len(weather_api) == 3
+    last = model.requests[-1]
+    assert last["tool_choice"] == "none" and last["tools"]
+    assert "Do not call any more tools" in last["messages"][-1]["content"]
+
+
+async def test_a_model_that_never_stops_calling_tools_is_cut_off(app_env, gateway, model, weather_api, monkeypatch):
+    monkeypatch.setattr(get_settings(), "max_tool_rounds", 2)
+    model.answers = [tool_use("weather_now", city="Hanoi")] * 3
 
     reply = await app_env.bot.responder.respond(context("weather?"))
 
     assert reply.error and "kept calling tools" in reply.error
-    assert len(weather_api) == MAX_TOOL_ROUNDS
+    assert len(weather_api) == 2
 
 
 async def test_toolbox_rejects_unknown_tools_and_bad_arguments():

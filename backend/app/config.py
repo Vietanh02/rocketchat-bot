@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     # MCP servers started over stdio run in this folder, so a Python server
     # kept here is set up as `python <folder>/server.py`.
     mcp_servers_dir: str = str(Path(__file__).resolve().parents[2] / "mcp_servers")
+    # Rounds of tool calls the language model may make in one answer (or one
+    # job step). Past them it is told to stop and answers once more without
+    # tools, from the results it has.
+    max_tool_rounds: int = Field(default=20, ge=1, le=100)
     # Scripts running at once, across chat and the portal's tester.
     script_max_concurrency: int = Field(default=20, ge=1, le=200)
     # Comma-separated names of environment variables scripts may see (API keys,

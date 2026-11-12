@@ -64,8 +64,14 @@ DEFAULT_SYSTEM_PROMPT_RAW = (
 )
 # Connecting gets this long at most, even when the timeout is longer.
 CONNECT_TIMEOUT_SECONDS = 10.0
-# Rounds of tool calls in one answer before the model is cut off.
-MAX_TOOL_ROUNDS = 5
+# Rounds of tool calls in one answer come from APP_MAX_TOOL_ROUNDS (20 by
+# default) unless the caller says otherwise. Past them the model gets one
+# more round without tools, to answer from what it has.
+# Sent before that last round.
+WRAP_UP_NOTE = (
+    "You have used all the tool calls allowed for this answer. Do not call any "
+    "more tools: answer now from the results above, and say what is still missing."
+)
 Message = dict[str, Any]
 # A tool that has not answered by then fails, and the model is told so.
 TOOL_TIMEOUT_SECONDS = 30.0
@@ -208,6 +214,7 @@ class LLMChat:
         tools: ToolRegistry | None = None,
         on_event: EventHandler | None = None,
         parallel_tools: bool = True,
+        max_tool_rounds: int | None = None,
         timer: TurnTimer | None = None,
         model: str | None = None,
         max_tokens: int | None = None,
@@ -219,22 +226,34 @@ class LLMChat:
         `model` and `max_tokens` override the configured ones for this call,
         as for a side job given to a cheaper model. `quick` marks such a side
         job: its request carries the configured extra fields for them.
+
+        After `max_tool_rounds` rounds of tool calls the model is told to stop
+        and answers in one more round, its tools still described (some
+        gateways need them to read the earlier calls) but not callable.
         """
         messages = list(messages)
         said: list[str] = []
         extra = self.quick_extra_body if quick else None
+        rounds = max(1, max_tool_rounds or get_settings().max_tool_rounds)
         try:
-            for tool_round in range(MAX_TOOL_ROUNDS + 1):
+            for tool_round in range(rounds + 1):
+                last = tool_round == rounds
+                if last:
+                    log.info("The model used its %d tool rounds; asking it to answer", rounds)
+                    messages.append({"role": "user", "content": WRAP_UP_NOTE})
                 if timer is not None:
                     timer.rounds += 1
                 text, calls = await self._round(
-                    messages, said, on_text, tools, timer, model, max_tokens, extra
+                    messages, said, on_text, tools, timer, model, max_tokens, extra, no_tools=last
                 )
                 if text.strip():
                     said.append(text.strip())
                 if not calls:
                     return "\n\n".join(said)
-                if tool_round == MAX_TOOL_ROUNDS:
+                if last:
+                    # It called tools anyway: keep whatever it wrote.
+                    if said:
+                        return "\n\n".join(said)
                     break
                 messages.append(
                     {
@@ -324,6 +343,8 @@ class LLMChat:
         model: str | None,
         max_tokens: int | None,
         extra_body: dict[str, Any] | None = None,
+        *,
+        no_tools: bool = False,
     ) -> tuple[str, list[ToolCall]]:
         """One completion: its text, and the tools it wants called."""
         options: dict = {}
@@ -335,6 +356,8 @@ class LLMChat:
             options["temperature"] = self._temperature
         if tools:
             options["tools"] = tools.schemas
+            if no_tools:
+                options["tool_choice"] = "none"
         model = model or self.model
 
         if on_text is None:

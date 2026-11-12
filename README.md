@@ -395,7 +395,7 @@ for questions like "what's the weather in Hanoi?". Its description and parameter
 become the tool's documentation, so write them for the model. The call goes through the same
 parameter binding, templates (`{{ user.username }}` is the person asking) and private-host guard
 as a command; the JSON response, or the error, goes back to the model, which then answers.
-At most 5 rounds of tool calls are made per answer.
+At most 20 rounds of tool calls are made per answer (`APP_MAX_TOOL_ROUNDS` in the root `.env`, 1–100). Past them the model is told to stop and answers once more without tools, from the results it has.
 
 Exposure is opt-in because the model decides when to call: anyone allowed to chat with the
 bot can get it to call a ticked integration with arguments of their choosing. Leave write

@@ -129,6 +129,7 @@ cp .env.example .env
 | `NO_PROXY` | Các host đi thẳng, không qua proxy, cách nhau dấu phẩy. Tên container (`backend`, `qdrant`, `embed`, `rocketchat`, `host.docker.internal`, `localhost`) **đã có sẵn**; biến này chỉ thêm vào. Rocket.Chat hay gateway nằm trong LAN thì thêm vào đây, ví dụ `chat.congty.vn,.noibo.congty.vn,10.1.2.3`. Dải IP kiểu `10.0.0.0/8` không phải thư viện nào cũng hiểu: ghi tên host hoặc từng IP. |
 | `APP_TLS_VERIFY` | `false` = **không kiểm tra chứng chỉ** HTTPS/WSS (gateway, Rocket.Chat, MCP, integration; pip/npm khi build; Node trong MCP stdio). Chỉ dùng khi proxy ký lại chứng chỉ bằng CA riêng. Mặc định `true`. Khi tắt, log backend có cảnh báo lúc khởi động. |
 | `APP_DEBUG` | `true` = chế độ gỡ lỗi (mục 8.5). Mặc định `false`. |
+| `APP_MAX_TOOL_ROUNDS` | Số vòng gọi tool tối đa trong một câu trả lời (hoặc một bước của job), từ 1 đến 100. Mặc định `20`. Hết số vòng, bot bảo model dừng gọi tool và trả lời bằng kết quả đã có. Đổi xong chạy `docker compose up -d backend`. |
 
 ```bash
 docker compose up -d --build            # sau khi sửa .env, tạo lại container
